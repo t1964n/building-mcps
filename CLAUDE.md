@@ -91,13 +91,71 @@ above, stop and ask Mark before writing code.
 ## 5. Tools exposed
 
 The authoritative list of tools is **whatever the server actually registers** — check the server code
-(or the tool registry / `list_tools`), don't assume from memory. Current core set includes: `nmap`,
-`masscan`, `gobuster`, `hydra`, `nikto`, `nuclei`, `sqlmap`, `whatweb`, `whois`, `dig`, `enum4linux`
-(plus others as added, e.g. `searchsploit`, `wpscan`, `dirb`).
+(or the tool registry / `list_tools`), don't assume from memory. The roster below is the **build
+target**: the tools to wrap, not a claim that any of them is already wired up.
+
+> **Base-image reality:** `kalilinux/kali-rolling` is *minimal* — none of these ship in it. Every tool
+> here is `apt`-installed in the Dockerfile. If a package fails to install, that must surface as a
+> **build error**, never a silently-skipped tool. Heavier installs to budget for: `metasploit-framework`
+> (large), and `suricata` / `zeek` / `snort` (rulesets + deps).
+
+### Offensive — the attack chain (recon → scan → exploit → crack)
+
+1. **`nmap`** — port / service / OS discovery; the backbone of recon.
+2. **`masscan`** — internet-scale fast port sweeps.
+3. **`nikto`** — web-server misconfig & known-vuln scanner.
+4. **`nuclei`** — templated vulnerability scanning across a target list.
+5. **`gobuster`** — directory / vhost / DNS brute-forcing (alts: `dirb`, `feroxbuster`).
+6. **`whatweb`** — web tech / CMS fingerprinting.
+7. **`wpscan`** — WordPress enumeration & vuln checks.
+8. **`sqlmap`** — automated SQL-injection discovery & exploitation.
+9. **`hydra`** — network login brute-forcer (SSH, HTTP, RDP, …).
+10. **`john`** (John the Ripper) — offline password-hash cracking.
+11. **`hashcat`** — GPU-accelerated cracking *(needs GPU passthrough to the container to be useful)*.
+12. **`metasploit-framework`** (`msfconsole`) — exploitation & post-exploitation framework.
+13. **`searchsploit`** — offline Exploit-DB lookup.
+14. **`enum4linux`** — SMB / Windows enumeration.
+15. **`aircrack-ng`** suite — wireless auditing & WPA-handshake cracking *(needs a monitor-mode adapter passed through to the container)*.
+16. **`responder`** — LLMNR / NBT-NS / mDNS poisoner + rogue auth server for NetNTLM credential capture; classic internal-AD red-team. *(Session-based — see the wrapping note below.)*
+17. **`bettercap`** — MITM / network-attack framework (ARP spoofing, sniffing, credential interception, BLE/Wi-Fi modules). *(Session-based — see the wrapping note below.)*
+
+*Lightweight recon helpers `whois` and `dig` stay in too.*
+
+> **Wrapping `responder` & `bettercap`:** both are *session* tools, not one-shot commands — `responder`
+> sits and listens/captures, `bettercap` runs a caplet or interactive session. Wrap each as a
+> **bounded-duration run** and return what it actually captured (hashes, intercepted creds, sniffed
+> data); don't expose them as a persistent service through the MCP layer. Both need `CAP_NET_RAW` +
+> `CAP_NET_ADMIN` (the caps already granted in §4) for their layer-2 work, and both are **loud on the
+> wire** — completely fine on your own segment, which is exactly what the §3 scope rule keeps them
+> pointed at.
+
+### Defensive — visibility → detection → forensics → hardening
+
+1. **Wireshark → `tshark`** — packet capture & deep protocol analysis. A headless container means you wrap **`tshark`** (Wireshark's CLI sibling); the GUI doesn't fit a request/response tool. **(REQUESTED)**
+2. **`tcpdump`** — lightweight CLI packet capture for quick taps.
+3. **`arp-scan`** — layer-2 host discovery & asset inventory; surfaces rogue devices and ARP-spoof anomalies on the segment. Dual-use, but a natural fit for your rogue-host / MAC-whitelist hunting. **(REQUESTED)**
+4. **`ngrep`** — grep-style pattern matching across live traffic or a pcap.
+5. **`suricata`** — network IDS/IPS; signature + protocol-anomaly detection.
+6. **`zeek`** — network security monitoring with rich protocol / connection logs.
+7. **`snort`** — long-standing signature-based IDS/IPS.
+8. **`kismet`** — wireless detector / WIDS; rogue-AP & evil-twin hunting *(needs a monitor-mode adapter)* — right up your street.
+9. **`lynis`** — host security auditing & hardening checks.
+10. **`chkrootkit`** — rootkit detection.
+11. **`rkhunter`** — rootkit / backdoor / local-exploit checks.
+12. **`clamav`** — open-source malware / AV scanning.
+13. **`aide`** — file-integrity monitoring against a baseline (detect tampering).
+14. **`fail2ban`** — log-driven intrusion prevention (auto-ban brute-forcers).
+15. **`ss` / `netstat`** — live socket & connection inspection (what's listening, what's connected).
+
+> **Wrapping the heavyweight NIDS:** `suricata`, `zeek`, and `snort` are built to run as long-lived
+> daemons, which doesn't map onto a one-shot MCP call. Wrap them in **"analyse a capture"** mode
+> (`suricata -r capture.pcap`, `zeek -r capture.pcap`) or a **bounded-duration** live run, and return
+> the parsed alerts/logs — don't try to expose them as a persistent service through the MCP layer.
 
 Every tool wrapper must: validate and sanitize inputs, run the real binary via a safe argument list,
 capture **both stdout and stderr**, return the real result (text + JSON), and surface a non-zero exit
-code as a clear failure — not as an empty "all clear".
+code as a clear failure — not as an empty "all clear". A tool that isn't installed says so plainly; it
+never gets faked.
 
 ---
 
