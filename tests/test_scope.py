@@ -77,6 +77,21 @@ def test_hostname_resolving_to_public_denied(monkeypatch):
     assert "public/global" in r.reason
 
 
+def test_multihomed_hostname_with_public_ip_denied(monkeypatch):
+    # A name resolving to one private + one public ip must be DENIED, and the
+    # offending public ip named. (The real security gap from the Task 1.2 flag.)
+    def _multi(host, port, *args, **kwargs):
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.168.50.1", 0)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 0)),
+        ]
+    monkeypatch.setattr(socket, "getaddrinfo", _multi)
+    r = validate_target("dual.lan")
+    assert r.allowed is False
+    assert "8.8.8.8" in r.reason  # the offending public ip is named
+    assert "8.8.8.8" in (r.resolved_ip or "")
+
+
 def test_unresolvable_hostname_denied(monkeypatch):
     def _boom(*args, **kwargs):
         raise socket.gaierror("Name or service not known")

@@ -146,10 +146,31 @@ def validate_target(target: str) -> ScopeResult:
     if not infos:
         return ScopeResult(False, target, None, "hostname resolved to no addresses — denied")
 
-    resolved = infos[0][4][0]  # first address from the first answer
-    try:
-        ip = ipaddress.ip_address(resolved)
-    except ValueError:
-        return ScopeResult(False, target, resolved, f"resolved address {resolved!r} not parseable — denied")
-    allowed, inner = _classify_ip(ip)
-    return ScopeResult(allowed, target, str(ip), f"{raw} -> {ip} ({inner})")
+    # Gather EVERY resolved address (de-duplicated, order-preserved). A multi-homed
+    # name is allowed only if ALL of its addresses are private — one private + one
+    # public must NOT pass (rebinding / split-horizon guard).
+    resolved_ips: list[str] = []
+    for info in infos:
+        addr = info[4][0]
+        if addr not in resolved_ips:
+            resolved_ips.append(addr)
+    resolved_str = ", ".join(resolved_ips)
+
+    for addr in resolved_ips:
+        try:
+            ip = ipaddress.ip_address(addr)
+        except ValueError:
+            return ScopeResult(
+                False, target, resolved_str,
+                f"{raw} -> resolved address {addr!r} not parseable — denied",
+            )
+        allowed, inner = _classify_ip(ip)
+        if not allowed:
+            return ScopeResult(
+                False, target, resolved_str,
+                f"{raw} -> {resolved_str}: {ip} is out of scope ({inner}) — denied",
+            )
+    return ScopeResult(
+        True, target, resolved_str,
+        f"{raw} -> {resolved_str} (all resolved addresses private) — allowed",
+    )
