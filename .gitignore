@@ -5,3 +5,6 @@ __pycache__/
 venv/
 *.egg-info/
 .env
+
+# Runtime audit logs — never commit captured command history
+logs/
