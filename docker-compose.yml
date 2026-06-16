@@ -1,0 +1,18 @@
+# Kali MCP Server — Phase 1 compose.
+#
+# CLAUDE.md §4: local/stdio only. We do NOT publish any port and do NOT use
+# privileged: true. cap_add (NET_RAW/NET_ADMIN) is forward-prep for the scan and
+# capture tools in Tasks 1.3/1.4 — harmless for list_tools, and far short of root.
+services:
+  kali-mcp:
+    build: .
+    image: kali-mcp:phase1
+    container_name: kali-mcp
+    # MCP speaks over stdio; keep stdin open so a client can attach
+    # (e.g. `docker compose run --rm kali-mcp`).
+    stdin_open: true
+    tty: true
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    # Deliberately absent: `ports:` (no 0.0.0.0 exposure) and `privileged: true`.

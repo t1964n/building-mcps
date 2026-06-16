@@ -1,0 +1,4 @@
+[tool.pytest.ini_options]
+# Put the repo root on sys.path so `import kali_mcp` works without installing.
+pythonpath = ["."]
+testpaths = ["tests"]
