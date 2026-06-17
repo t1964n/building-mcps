@@ -91,10 +91,11 @@ def register_all(mcp) -> None:
     This is the single wiring point server.py calls. Imports are done here
     (function-local) to avoid a registry <-> tools import cycle.
     """
-    from .tools import arpscan, masscan, meta, nmap, tshark
+    from .tools import arpscan, arpwatch, masscan, meta, nmap, tshark
 
     meta.register(mcp)
     nmap.register(mcp)
     masscan.register(mcp)
     tshark.register(mcp)
     arpscan.register(mcp)
+    arpwatch.register(mcp)
