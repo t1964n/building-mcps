@@ -10,14 +10,15 @@ and returns an error; a stale scan is stamped with its age, never presented as c
 
 from __future__ import annotations
 
-from ..dashboard import DEFAULT_STALE_THRESHOLD_SECONDS, generate_dashboard
+from ..dashboard import DEFAULT_STALE_THRESHOLD_SECONDS
+from ..dashboard import generate_dashboard as _generate_dashboard
 
 
 def register(mcp) -> None:
     """Attach generate_dashboard to the FastMCP app."""
 
     @mcp.tool
-    def generate_dashboard_tool(
+    def generate_dashboard(
         output_path: str | None = None,
         whitelist_path: str | None = None,
         recent_audit: int = 10,
@@ -39,7 +40,7 @@ def register(mcp) -> None:
         Default output is ./state/dashboard.html (gitignored — may contain real device
         IP/MAC). Pass output_path to write elsewhere.
         """
-        return generate_dashboard(
+        return _generate_dashboard(
             output_path=output_path,
             whitelist_path=whitelist_path,
             recent_audit=recent_audit,

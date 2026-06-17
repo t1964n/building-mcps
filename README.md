@@ -50,13 +50,17 @@ exit as a clear failure:
 | `masscan_scan` | High-speed asynchronous port sweep. | **Scope-gated** + **rate-limited** (`max_rate` default 1000 pps, ceiling 100000). |
 | `tshark_capture` | Bounded packet capture & protocol/talker summary; can also read an offline `.pcap`. | **Bounded** (mandatory `duration_s` ≤ 300 and/or `packet_count` ≤ 100000) + interface/BPF shape validation. |
 | `arp_scan` | Layer-2 host discovery on the local segment → `{ip, mac, vendor}` per responder. | No scope gate needed (ARP is non-routable, self-limiting to the segment); interface shape-validated, explicit ranges must be private CIDRs. |
-| `arp_watch` | Runs `arp_scan` and **diffs the result against your device whitelist**, flagging unlisted devices. | **Whitelist-diffed**; refuses to give a verdict if the whitelist can't load. |
+| `arp_watch` | Runs `arp_scan` and **diffs the result against your device whitelist**, flagging unlisted devices. Persists its last result to `state/last_watch.json` so the dashboard can read it. | **Whitelist-diffed**; refuses to give a verdict if the whitelist can't load. |
+| `network_status` | Composes the whole platform's state into **one honest snapshot**: each roster tool's real install status, audit-log tallies, the whitelist's load state, and the **last** `arp_watch` result (read from persisted state — it does **not** scan). | Read-only; no target. Never fabricates a verdict — "no scan data", "all clear", and "whitelist broken" stay distinct (no data ≠ all clear). |
+| `generate_dashboard` | Renders `network_status` into a **self-contained** static HTML dashboard file — no server, no port, opened straight from disk. A point-in-time snapshot stamped `generated_at`. | Read-only + writes one HTML file (default `state/dashboard.html`, gitignored). Writes **nothing** if the snapshot fails — never a stale/blank file. |
 
 > **Roster vs. reality.** [`CLAUDE.md §5`](./CLAUDE.md) lists a much larger offensive + defensive
 > roster (nikto, nuclei, sqlmap, hydra, metasploit, suricata, zeek, …). That roster is the
-> **build target**, not a claim of completion. `list_tools` reports each one's real install
-> status — and everything outside the six tools above currently reports `installed: false`,
-> honestly, because it hasn't been wrapped or installed yet.
+> **build target**, not a claim of completion. Of the eight tools above, six wrap a roster binary
+> and two (`network_status`, `generate_dashboard`) are platform tools that compose the others.
+> `list_tools` reports each roster binary's real install status — and everything outside the six
+> wrapped binaries currently reports `installed: false`, honestly, because it hasn't been wrapped
+> or installed yet.
 
 ---
 
@@ -168,6 +172,81 @@ The whitelist loader lives in [`kali_mcp/whitelist.py`](./kali_mcp/whitelist.py)
 
 ---
 
+## The dashboard (Phase 4)
+
+`generate_dashboard` turns the platform's real state into a **self-contained static HTML file** —
+no web server, no open port, no external fonts or CDN. You open it straight from disk (`file://`).
+It is a **point-in-time snapshot**, stamped with `generated_at`, not a live view — and it says so.
+
+### The full loop
+
+The dashboard never scans on its own. It reads state that `arp_watch` produced, so the data flow
+is explicit and each stage is independently honest:
+
+```
+arp_watch            network_status              generate_dashboard
+  │ runs a REAL         │ reads the persisted        │ inlines that snapshot into a
+  │ arp-scan + diff     │ last_watch + probes        │ self-contained HTML file
+  ▼                     ▼ tools/audit/whitelist      ▼
+state/last_watch.json ──► one honest snapshot  ──────► state/dashboard.html  ──► open in a browser
+```
+
+1. **`arp_watch`** runs a real `arp_scan` and diffs it against your whitelist, then persists the
+   result to `state/last_watch.json` (gitignored — it holds real device MAC/IP).
+2. **`network_status`** reads that persisted result (it does **not** run a scan), and probes the
+   live install status, audit log, and whitelist, returning one structured snapshot.
+3. **`generate_dashboard`** embeds that snapshot into the dashboard template and writes
+   `state/dashboard.html` — self-contained, open it anywhere.
+
+### Honest states (this is the project's identity, in the UI)
+
+The dashboard's whole reason to exist is that the three things a lazy dashboard collapses into one
+green light stay **visually distinct** — a green "all clear" is shown **only** when it's genuinely
+earned, never because data failed to load or is old:
+
+| State | What the dashboard shows |
+|-------|--------------------------|
+| **Fresh + all clear** | Green "ALL CLEAR — every device known" — only when devices were seen *and* all matched. |
+| **Rogues present** | A loud red alert with the rogue count and each rogue's ip/mac/vendor — the loudest thing on the page. |
+| **Stale** | An amber "⏱ DATA IS N OLD — re-run arp_watch" banner above the panel. A days-old all-clear is **not** a current all-clear. |
+| **No data** | A neutral grey/blue "ⓘ NO SCAN DATA — run arp_watch" panel — deliberately **not** green, never a pass. |
+| **Whitelist broken** | An amber "⚠ WHITELIST ERROR" with the load error — not green, not a rogue count. |
+| **Generation failed** | `generate_dashboard` writes **nothing** and returns an error rather than a misleading file. |
+
+Two timestamps are shown and never blurred: **`generated_at`** (when the snapshot was built) in the
+header, and the network panel's own **`as_of`** (when `arp_watch` actually scanned). A fresh
+snapshot can still carry an old scan — staleness is measured on `as_of` (default threshold 1 hour).
+
+### Accessibility (a requirement, not a nicety)
+
+The dark-terminal theme is built for legibility: near-black background with bright (~17:1, past
+WCAG AAA) foreground, large monospace text (≥19px), and **status is never signalled by colour
+alone** — every state carries a symbol + text label (`✓ KNOWN`, `⚠ ROGUE`, `≠ IP MISMATCH`,
+`○ ABSENT`), so it reads without colour perception.
+
+### Generate one
+
+```sh
+# 1. whitelist in place (see above), then run arp_watch in the real-LAN container so it persists state:
+docker compose --profile lan run --rm -v "$PWD":/app kali-mcp-lan \
+  python -c "import asyncio; from kali_mcp.tools.arpwatch import watch; \
+             print(asyncio.run(watch(interface='wlan0'))['verdict'])"
+
+# 2. build the dashboard from that real state:
+docker compose --profile lan run --rm -v "$PWD":/app kali-mcp-lan \
+  python -c "from kali_mcp.dashboard import generate_dashboard as g; print(g()['path'])"
+
+# 3. open it (it's self-contained — no server):
+xdg-open state/dashboard.html
+```
+
+In normal use you'd drive steps 1–2 by asking your MCP client to run the `arp_watch` and
+`generate_dashboard` tools; the commands above are the equivalent direct invocations. The
+dashboard template + mock-state viewer are documented in
+[`dashboard/README.md`](./dashboard/README.md).
+
+---
+
 ## Project status
 
 Built one scoped task at a time; each commit on the branch is one task. Where things stand:
@@ -181,6 +260,10 @@ Built one scoped task at a time; each commit on the branch is one task. Where th
 - **Phase 3 — drivable + rogue-host watcher (done):** real MCP-client connection config
   ([`CONNECTING.md`](./CONNECTING.md)), the validated device whitelist store, and the `arp_watch`
   rogue-host watcher.
+- **Phase 4 — the dashboard (done):** the `network_status` honest snapshot contract, the
+  high-contrast accessible dashboard template, and `generate_dashboard` — a self-contained static
+  HTML view of real platform state, with the fresh / stale / no-data / whitelist-broken /
+  generation-failure states all kept visually distinct.
 
 **Deliberately _not_ done yet** (so this README doesn't imply more than exists):
 
@@ -199,7 +282,7 @@ Built one scoped task at a time; each commit on the branch is one task. Where th
 ## Tests
 
 ```sh
-python -m pytest -q     # 106 tests, all green
+python -m pytest -q     # 131 tests, all green
 ```
 
 The suite is **fully offline**: `run_tool` is monkeypatched with canned `ToolResult`s built from
@@ -225,6 +308,10 @@ error) — failure handling is treated as a feature, not an afterthought.
 ├── server.py                     # FastMCP entry point (stdio); wires the roster
 ├── whitelist.example.yaml        # placeholder whitelist (committed)
 ├── whitelist.yaml                # your real device inventory (gitignored)
+├── dashboard/
+│   ├── template.html             # self-contained dark-terminal dashboard + render()
+│   ├── mock_snapshots.js         # fixture states for the offline mock viewer
+│   └── README.md                 # dashboard shell + live-generation notes
 ├── kali_mcp/
 │   ├── executor.py               # run_tool — the single faithful executor
 │   ├── audit.py                  # append-only JSONL audit log
@@ -232,13 +319,19 @@ error) — failure handling is treated as a feature, not an afterthought.
 │   ├── registry.py               # the tool ROSTER + register_all wiring
 │   ├── whitelist.py              # device whitelist store + normalize_mac
 │   ├── watch.py                  # pure rogue-host diff (KNOWN/ROGUE/IP_MISMATCH/ABSENT)
+│   ├── state.py                  # persist/read the last arp_watch result (state/last_watch.json)
+│   ├── status.py                 # build_status — the honest whole-platform snapshot
+│   ├── dashboard.py              # generate_dashboard core (snapshot -> self-contained HTML)
 │   └── tools/
 │       ├── meta.py               # list_tools
 │       ├── nmap.py               # nmap_scan
 │       ├── masscan.py            # masscan_scan
 │       ├── tshark.py             # tshark_capture
 │       ├── arpscan.py            # arp_scan
-│       └── arpwatch.py           # arp_watch
+│       ├── arpwatch.py           # arp_watch
+│       ├── status_tool.py        # network_status
+│       └── dashboard_tool.py     # generate_dashboard
 ├── tests/                        # offline unit tests (run_tool monkeypatched)
+├── state/                        # last_watch.json + generated dashboard.html (gitignored)
 └── logs/audit.jsonl              # runtime audit log (gitignored)
 ```
