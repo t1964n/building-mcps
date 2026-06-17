@@ -4,8 +4,8 @@
 #   * base = kalilinux/kali-rolling
 #   * runs as a NON-ROOT user `pentester` (never root)
 #   * installs only the tools wrapped so far (Phase 1: nmap + tshark;
-#     Phase 2 Task 2.3: + masscan); the rest of the roster stays uninstalled on
-#     purpose, so list_tools honestly reports it missing.
+#     Phase 2: + masscan (2.3) + arp-scan (2.4)); the rest of the roster stays
+#     uninstalled on purpose, so list_tools honestly reports it missing.
 FROM kalilinux/kali-rolling
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -28,6 +28,7 @@ RUN echo "wireshark-common wireshark-common/install-setuid boolean false" | debc
         nmap \
         tshark \
         masscan \
+        arp-scan \
     && rm -rf /var/lib/apt/lists/*
 # libcap2-bin is pulled in transitively today, but we install it EXPLICITLY: the
 # raw-socket-caps step below depends on `setcap`, and a transitive dep can vanish
@@ -80,6 +81,7 @@ RUN set -eux; \
     for bin in \
         /usr/bin/dumpcap \
         /usr/bin/masscan \
+        /usr/sbin/arp-scan \
     ; do \
         real="$(readlink -f "$bin")"; \
         before="$(getcap "$real" 2>/dev/null || true)"; \
