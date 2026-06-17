@@ -147,6 +147,27 @@
   .net.is-broken { background: #2a2310; border-left-color: var(--amber); }
   .net.is-broken .net-headline { color: var(--amber); }
 
+  /* live staleness banner — amber, loud, sits ABOVE the panel so a stale all-clear
+     can never read as a current all-clear (§2 live rule). */
+  .stale-banner {
+    background: #3a2d0a;
+    color: var(--amber);
+    border: 3px solid var(--amber);
+    border-radius: 10px;
+    padding: 14px 18px;
+    margin-bottom: 14px;
+    font-size: 1.25rem;
+    font-weight: 800;
+    letter-spacing: 0.5px;
+  }
+  /* network panel's own scan time (as_of), distinct from header generated_at. */
+  .net-asof {
+    font-size: 1.0rem;
+    color: var(--fg-dim);
+    font-weight: 700;
+    margin: 4px 0 0;
+  }
+
   /* ---- status count badges (summary) ---- */
   .badges { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 18px; }
   .badge {
@@ -289,24 +310,51 @@
       .replace(/"/g, "&quot;");
   }
 
+  // A loud, amber staleness banner. The §2 live rule: a days-old all-clear is NOT a
+  // current all-clear, so even on a green panel this banner makes the age impossible to
+  // miss. `staleness` is computed by the generator (4.3) and embedded; mocks omit it.
+  function staleBanner(staleness) {
+    if (!staleness || staleness.stale !== true) return "";
+    return '<div class="stale-banner" role="alert">⏱ DATA IS ' +
+      esc(String(staleness.age_human || "").toUpperCase()) +
+      " OLD — re-run arp_watch. A stale all-clear is NOT a current all-clear.</div>";
+  }
+
+  // The network panel's OWN scan timestamp (as_of) — DISTINCT from the header's
+  // generated_at (snapshot time). The snapshot can be fresh while the scan is old; the
+  // UI must never blur the two.
+  function asOfLine(net, staleness) {
+    if (!net || !net.as_of) return "";
+    var age = staleness && staleness.age_human
+      ? ' <span class="kv">(' + esc(staleness.age_human) + " old)</span>"
+      : "";
+    return '<p class="net-asof">scanned (as_of): <strong>' + esc(net.as_of) + "</strong>" + age + "</p>";
+  }
+
   // ---- the single render entry point: snapshot in -> DOM out (pure-ish) ----
-  function render(snapshot) {
-    renderHeader(snapshot);
-    renderNetwork(snapshot.network, snapshot.whitelist);
+  // `meta` carries generator-computed live context (network staleness); optional so the
+  // 4.2 mock viewer still calls render(snapshot) with one argument.
+  function render(snapshot, meta) {
+    meta = meta || {};
+    renderHeader(snapshot, meta);
+    renderNetwork(snapshot.network, snapshot.whitelist, meta.network_staleness);
     renderTools(snapshot.tools, snapshot.tool_counts);
     renderAudit(snapshot.audit);
   }
 
-  function renderHeader(snapshot) {
+  function renderHeader(snapshot, meta) {
     var asof = document.getElementById("asof");
     asof.innerHTML =
-      "as of <strong>" + esc(snapshot.generated_at) + "</strong>" +
-      '<span class="live-note">(snapshot — not live)</span>';
+      "snapshot generated <strong>" + esc(snapshot.generated_at) + "</strong>" +
+      '<span class="live-note">(point-in-time — not live)</span>';
   }
 
   // The §2 heart of the UI: pick exactly one visually-distinct network state.
-  function renderNetwork(net, whitelist) {
+  // `staleness` (generator-computed) adds the live "scan is old" marker on top.
+  function renderNetwork(net, whitelist, staleness) {
     var el = document.getElementById("network");
+    var stale = staleBanner(staleness);
+    var asof = asOfLine(net, staleness);
 
     // (c) whitelist broken takes precedence: there is no trustworthy verdict to give.
     if (whitelist && whitelist.loaded === false) {
@@ -348,11 +396,12 @@
           '<span class="kv">mac</span> <code>' + esc(r.mac || "?") + '</code> ' +
           '<span class="kv">vendor</span> <code>' + esc(r.vendor || "(unknown)") + '</code></li>';
       }).join("");
-      el.innerHTML =
+      el.innerHTML = stale +
         '<div class="net is-rogue" role="alert">' +
           '<p class="net-headline"><span class="symbol">⚠</span> ' + esc(s.rogue) +
             ' ROGUE DEVICE' + (s.rogue === 1 ? "" : "S") + ' ON THE SEGMENT</p>' +
           '<p class="net-sub">' + esc(net.note || "Unlisted device(s) detected.") + '</p>' +
+          asof +
           badges +
           '<ul class="rogue-list">' + rogueItems + "</ul>" +
         "</div>";
@@ -361,20 +410,22 @@
 
     // (a-clear) earned all-clear: GREEN, only here.
     if (net.all_clear === true) {
-      el.innerHTML =
+      el.innerHTML = stale +
         '<div class="net is-clear">' +
           '<p class="net-headline"><span class="symbol">✓</span> ALL CLEAR — EVERY DEVICE KNOWN</p>' +
           '<p class="net-sub">' + esc(net.note || "All discovered devices matched the whitelist.") + '</p>' +
+          asof +
           badges +
         "</div>";
       return;
     }
 
     // 0 rogues but not an earned clear (e.g. IP mismatch) -> amber review, not green.
-    el.innerHTML =
+    el.innerHTML = stale +
       '<div class="net is-review">' +
         '<p class="net-headline"><span class="symbol">≠</span> REVIEW — 0 ROGUES, BUT NOT A CLEAN MATCH</p>' +
         '<p class="net-sub">' + esc(net.note || "Some devices need review.") + '</p>' +
+        asof +
         badges +
       "</div>";
   }
@@ -447,6 +498,7 @@
       '<span class="lbl">' + esc(label) + "</span></div>";
   }
 
+  // === DASHBOARD_BOOTSTRAP_START (Task 4.3 generate_dashboard replaces everything between these markers with the live, embedded snapshot) ===
   // ---- bootstrap: pick a mock via ?mock=<key>, render it, build the switcher ----
   (function init() {
     var snaps = window.MOCK_SNAPSHOTS || {};
@@ -469,6 +521,7 @@
         '<div class="empty">No mock snapshot found.</div>';
     }
   })();
+  // === DASHBOARD_BOOTSTRAP_END ===
 </script>
 </body>
 </html>

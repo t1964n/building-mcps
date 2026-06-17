@@ -26,11 +26,31 @@ file:///…/dashboard/template.html?mock=whitelist_broken   # amber whitelist-er
 
 No `?mock=` defaults to the first fixture (`rogues_present`).
 
-## How 4.3 will wire it
+## Live generation (Task 4.3 — done)
 
-`template.html` exposes a single `render(snapshot)` function (snapshot-in → DOM-out).
-The bootstrap at the bottom currently calls `render(MOCK_SNAPSHOTS[key])`. In 4.3 that one
-call is replaced with the real `network_status` payload; everything else stays.
+`template.html` exposes a single `render(snapshot, meta)` function (snapshot-in → DOM-out).
+Opened directly it runs the mock bootstrap (the `?mock=` viewer above). The
+`generate_dashboard` MCP tool (`kali_mcp/dashboard.py`) reuses this same template: it builds
+a REAL `build_status()` snapshot, removes the external `mock_snapshots.js` dependency, and
+replaces the bootstrap (between the `DASHBOARD_BOOTSTRAP_START/END` markers) with the live
+snapshot embedded inline. The output is a **self-contained** static file (default
+`./state/dashboard.html`, gitignored — may hold real IP/MAC) with no server and no network
+calls.
+
+Live honesty added on top of the 4.2 states:
+- header shows `generated_at` (snapshot time); the network panel shows its own `as_of`
+  (scan time) — **distinct** timestamps, never blurred.
+- a **stale** banner (amber, above the panel) appears when the scan `as_of` is older than
+  the threshold (default 1h) — a days-old all-clear is not a current all-clear.
+- if `build_status()` fails, the tool writes **nothing** and returns an error rather than a
+  stale/blank file.
+
+Generate it:
+
+```
+# via the MCP tool `generate_dashboard`, or directly:
+python -c "from kali_mcp.dashboard import generate_dashboard as g; print(g())"
+```
 
 ## Regenerate the screenshots
 
