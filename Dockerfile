@@ -3,8 +3,9 @@
 # Locked decisions (CLAUDE.md §4):
 #   * base = kalilinux/kali-rolling
 #   * runs as a NON-ROOT user `pentester` (never root)
-#   * Phase 1 installs ONLY nmap + tshark; the rest of the roster stays
-#     uninstalled on purpose, so list_tools honestly reports it missing.
+#   * installs only the tools wrapped so far (Phase 1: nmap + tshark;
+#     Phase 2 Task 2.3: + masscan); the rest of the roster stays uninstalled on
+#     purpose, so list_tools honestly reports it missing.
 FROM kalilinux/kali-rolling
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -26,6 +27,7 @@ RUN echo "wireshark-common wireshark-common/install-setuid boolean false" | debc
         libcap2-bin \
         nmap \
         tshark \
+        masscan \
     && rm -rf /var/lib/apt/lists/*
 # libcap2-bin is pulled in transitively today, but we install it EXPLICITLY: the
 # raw-socket-caps step below depends on `setcap`, and a transitive dep can vanish
@@ -77,6 +79,7 @@ RUN chown -R pentester:pentester /app "$VIRTUAL_ENV"
 RUN set -eux; \
     for bin in \
         /usr/bin/dumpcap \
+        /usr/bin/masscan \
     ; do \
         real="$(readlink -f "$bin")"; \
         before="$(getcap "$real" 2>/dev/null || true)"; \
