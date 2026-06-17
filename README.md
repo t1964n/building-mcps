@@ -1,0 +1,244 @@
+# Kali MCP Server
+
+A Docker-based [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server that
+exposes a curated set of Kali Linux security tools to an MCP client (Claude Desktop / Claude
+Code) over stdio. It is built on `kalilinux/kali-rolling`, written in Python with
+[FastMCP](https://github.com/jlowin/fastmcp), and runs as a **non-root** user with only the
+specific Linux capabilities the offensive tools need. It exists for one purpose: **authorized,
+hands-on security testing of the operator's _own_ home network and lab devices.** Targets are
+restricted in code to private ranges (192.168.x.x, 10.x.x.x, 172.16–31.x.x) — that permits the
+full toolset against every device you own, and blocks pointing a tool at anything that isn't
+yours. Nothing else.
+
+---
+
+## The contract: no BS, no hallucination
+
+This server's whole identity is **trustworthy output**. Mark makes real security decisions
+based on what these tools report, and a fabricated result is worse than no result — it can send
+you chasing a vulnerability that doesn't exist, or quietly reassure you about one that does. So
+every wrapper is built to the same rules:
+
+- **Real output or a real failure — never a fabrication.** A tool reports its actual stdout/stderr
+  and the exact command that ran, or it says plainly that it didn't run.
+- **"Errored" is not "found nothing."** A tool that times out, isn't installed, or hits a
+  permission error is a *different fact* from a tool that ran cleanly and found nothing. The two
+  are never conflated.
+- **Verdicts are earned, not defaulted.** The rogue-host watcher's "all clear" only happens when
+  devices were actually seen *and* every one matched — an empty or failed scan is reported as
+  exactly that, not as a clean bill of health.
+- **No invented specifics.** IPs, MACs, ports, versions, CVEs — if there's no real result, the
+  honest answer is "couldn't determine."
+
+The authoritative statement of these rules — and of the locked architecture/scope decisions — is
+[`CLAUDE.md`](./CLAUDE.md). **That file is the source of truth for this project**; this README is
+the front door.
+
+---
+
+## Tools implemented today
+
+These are the tools the server **actually wraps and registers** right now (verified in
+[`kali_mcp/registry.py`](./kali_mcp/registry.py)). Each one validates its input, runs the real
+binary via an argument list (never a shell), captures real stdout/stderr, and surfaces a non-zero
+exit as a clear failure:
+
+| Tool | What it does | Safety model |
+|------|--------------|--------------|
+| `list_tools` | Reports every tool in the roster with its **real** install status (a live `shutil.which` check, never hardcoded). | Read-only; no target. |
+| `nmap_scan` | Port / service / version discovery. `scan_type` is an allow-list: `ping`, `quick`, `connect`, `syn`, `version`, `default`. | **Scope-gated** (private-range only); `scan_type`/`ports` are validated keys, not arbitrary flags. |
+| `masscan_scan` | High-speed asynchronous port sweep. | **Scope-gated** + **rate-limited** (`max_rate` default 1000 pps, ceiling 100000). |
+| `tshark_capture` | Bounded packet capture & protocol/talker summary; can also read an offline `.pcap`. | **Bounded** (mandatory `duration_s` ≤ 300 and/or `packet_count` ≤ 100000) + interface/BPF shape validation. |
+| `arp_scan` | Layer-2 host discovery on the local segment → `{ip, mac, vendor}` per responder. | No scope gate needed (ARP is non-routable, self-limiting to the segment); interface shape-validated, explicit ranges must be private CIDRs. |
+| `arp_watch` | Runs `arp_scan` and **diffs the result against your device whitelist**, flagging unlisted devices. | **Whitelist-diffed**; refuses to give a verdict if the whitelist can't load. |
+
+> **Roster vs. reality.** [`CLAUDE.md §5`](./CLAUDE.md) lists a much larger offensive + defensive
+> roster (nikto, nuclei, sqlmap, hydra, metasploit, suricata, zeek, …). That roster is the
+> **build target**, not a claim of completion. `list_tools` reports each one's real install
+> status — and everything outside the six tools above currently reports `installed: false`,
+> honestly, because it hasn't been wrapped or installed yet.
+
+---
+
+## Security architecture
+
+- **Non-root by design.** The container runs as the unprivileged `pentester` user — never root,
+  never `--privileged`.
+- **Capabilities, not root.** Raw-socket tools (nmap `-sS`, masscan, arp-scan, tshark's dumpcap)
+  get exactly `CAP_NET_RAW` + `CAP_NET_ADMIN` via the compose `cap_add` bounding set **plus** a
+  reusable `setcap …+eip` step in the [`Dockerfile`](./Dockerfile). This is the Phase-2 caps
+  pattern: a tool that ships without file-caps gets them added to one explicit list — never a
+  blanket grant. (`nmap` already ships its own caps and rides the bounding set for free.)
+- **Scope gate.** [`kali_mcp/scope.py`](./kali_mcp/scope.py) validates every routable target
+  against private ranges (loopback + RFC1918 + ULA allowed; CGNAT, global, and link-local
+  denied). It is enforced in **both** network modes — host networking gives more *reach*, never a
+  weaker *gate* (8.8.8.8 stays refused under `--network host`).
+- **Append-only audit log.** Every command run is logged as JSONL (tool, argv, target, exit code,
+  duration, timestamp) to `logs/audit.jsonl` (override with `KALI_MCP_AUDIT_LOG`). No code path
+  bypasses it.
+- **Input validation, no shell injection.** Inputs are Pydantic-validated and commands are built
+  as argument lists — no `shell=True` with interpolated input.
+
+> **Honest caveat — VPN killswitch vs. layer.** On a host with an active Mullvad VPN killswitch
+> (policy-routing `fwmark` rule), kernel-socket tools (nmap `-sT`/`-sS`, curl) read LAN TCP ports
+> as filtered/down, while layer-2 / raw tools (masscan via AF_PACKET, arp-scan via ARP) still see
+> the true LAN state — because they bypass the IP-socket policy routing. So on such a host the L2
+> tools reflect reality and the socket-based modes can disagree. That's the VPN, not a bug; keep
+> it in mind when nmap and masscan/arp-scan diverge.
+
+---
+
+## Network modes
+
+Same image, same caps, same stdio — only the container's network stack differs (full reasoning in
+[`NETWORKING.md`](./NETWORKING.md)):
+
+| Compose service | Network | Use it for |
+|-----------------|---------|------------|
+| `kali-mcp` | bridge (default, isolated) | loopback / self-tests. **Start here.** On bridge, host-discovery to LAN hosts is filtered, so your own router reads "down". |
+| `kali-mcp-lan` | `--network host` (opt-in, profile `lan`) | **real LAN scans** — your actual devices become reachable. A deliberate opt-in because it drops the bridge isolation layer. |
+
+---
+
+## Quick start
+
+### 1. Build the image
+
+```sh
+cd ~/building-mcps
+docker compose build          # tags kali-mcp:phase1
+docker images | grep kali-mcp # confirm it exists
+```
+
+### 2. Connect an MCP client
+
+The server speaks MCP over the container's **stdio** (no network port is ever opened). The client
+launches the container per session. Full instructions — Claude Desktop and Claude Code, both
+network modes — are in [`CONNECTING.md`](./CONNECTING.md); copy from
+[`mcp-client-config.example.json`](./mcp-client-config.example.json). The short version:
+
+```sh
+# Claude Code, bridge (default):
+claude mcp add-json kali-mcp '{"command":"docker","args":["run","-i","--rm","--cap-add","NET_RAW","--cap-add","NET_ADMIN","kali-mcp:phase1","python","server.py"]}'
+
+# Claude Code, real-LAN (opt-in):
+claude mcp add-json kali-mcp-lan '{"command":"docker","args":["run","-i","--rm","--network","host","--cap-add","NET_RAW","--cap-add","NET_ADMIN","kali-mcp:phase1","python","server.py"]}'
+```
+
+### 3. Set up your device whitelist (for `arp_watch`)
+
+```sh
+cp whitelist.example.yaml whitelist.yaml   # whitelist.yaml is gitignored — your real inventory
+$EDITOR whitelist.yaml                       # add your devices: mac (required) + name; ip/note optional
+```
+
+### 4. Run a first scan
+
+Ask the client (in real-LAN mode) to run `list_tools`, then e.g. an `arp_scan` on your interface,
+then `arp_watch` to diff it against your whitelist.
+
+---
+
+## The whitelist & rogue-host watcher
+
+`arp_watch` is the platform's headline feature: it answers *"is there anything on my network I
+don't recognize?"*
+
+1. Copy `whitelist.example.yaml` → `whitelist.yaml` (gitignored, so your real MACs are never
+   committed) and list your known devices. A `mac` is accepted in any common form (colon, hyphen,
+   Cisco-dot, any case) and canonicalized internally, so format differences never cause a false
+   alarm. `name` is required; `ip` and `note` are optional.
+2. Run `arp_watch` on your interface. It loads the whitelist, runs a real `arp_scan`, and classifies
+   every discovered host into exactly one bucket, plus computes what's missing:
+
+   | Verdict | Meaning |
+   |---------|---------|
+   | **KNOWN** | MAC is in the whitelist (and, if an IP was specified, it matches). |
+   | **ROGUE** | MAC is **not** in the whitelist — the headline alert; reported with ip/mac/vendor so you can hunt it. |
+   | **IP_MISMATCH** | Known MAC, but on a different IP than expected — reported **neutrally** (could be DHCP, could be spoofing; stated as a fact, not an accusation). |
+   | **ABSENT** | A whitelisted device that didn't answer this scan — neutral (off/asleep/away). |
+
+3. **A broken whitelist produces no verdict.** If the whitelist is missing or malformed, `arp_watch`
+   *refuses* and surfaces the load error instead of scanning and calling everything a rogue — a
+   false alarm on a security tool is itself a failure. Likewise, if the underlying `arp_scan`
+   errors or finds nothing, that real status is propagated — never repackaged as a fake "all clear."
+
+The whitelist loader lives in [`kali_mcp/whitelist.py`](./kali_mcp/whitelist.py); the pure diff in
+[`kali_mcp/watch.py`](./kali_mcp/watch.py).
+
+---
+
+## Project status
+
+Built one scoped task at a time; each commit on the branch is one task. Where things stand:
+
+- **Phase 1 — core + first wrappers (done):** the faithful executor (`run_tool`) + audit logging,
+  the private-range scope gate, honest `list_tools`, and the first two tool archetypes —
+  `nmap_scan` (active) and `tshark_capture` (passive/bounded).
+- **Phase 2 — capabilities & networking (done):** the reusable non-root `setcap` raw-socket
+  pattern, the bridge-vs-host network modes, and two more wrappers — `masscan_scan` and
+  `arp_scan`.
+- **Phase 3 — drivable + rogue-host watcher (done):** real MCP-client connection config
+  ([`CONNECTING.md`](./CONNECTING.md)), the validated device whitelist store, and the `arp_watch`
+  rogue-host watcher.
+
+**Deliberately _not_ done yet** (so this README doesn't imply more than exists):
+
+- Most of the [`CLAUDE.md §5`](./CLAUDE.md) roster is unwrapped and uninstalled (nikto, nuclei,
+  gobuster, sqlmap, hydra, john/hashcat, metasploit, enum4linux, the NIDS suite, etc.).
+- `nmap_scan` exposes a fixed scan-type allow-list only — **no `-Pn`** (host-discovery skip) and
+  **no UDP** (`-sU`) scanning yet.
+- `tshark_capture`'s BPF filter is a **conservative** allow-list (letters/digits/spaces and
+  `. : / -`); brackets, arithmetic, and byte-offset filters are rejected, trading expressiveness
+  for safety. Widening it is a future decision.
+- GPU cracking, monitor-mode wireless, and session tools (responder/bettercap) need hardware
+  passthrough and are not wrapped.
+
+---
+
+## Tests
+
+```sh
+python -m pytest -q     # 106 tests, all green
+```
+
+The suite is **fully offline**: `run_tool` is monkeypatched with canned `ToolResult`s built from
+real sample tool output, so **no live scanning or capture happens during tests**. Every wrapper
+has both happy-path and failure-path coverage (tool missing, bad input, timeout, permission
+error) — failure handling is treated as a feature, not an afterthought.
+
+---
+
+## Layout
+
+```
+.
+├── CLAUDE.md                     # source of truth: rules, scope, locked decisions
+├── README.md                     # this file
+├── CONNECTING.md                 # connect an MCP client (Desktop / Code)
+├── NETWORKING.md                 # bridge vs --network host, and why
+├── Dockerfile                    # kali-rolling image; non-root pentester + setcap caps
+├── docker-compose.yml            # kali-mcp (bridge) + kali-mcp-lan (host, profile lan)
+├── mcp-client-config.example.json
+├── requirements.txt              # fastmcp, pyyaml, pytest
+├── pyproject.toml                # pytest config (pythonpath, testpaths)
+├── server.py                     # FastMCP entry point (stdio); wires the roster
+├── whitelist.example.yaml        # placeholder whitelist (committed)
+├── whitelist.yaml                # your real device inventory (gitignored)
+├── kali_mcp/
+│   ├── executor.py               # run_tool — the single faithful executor
+│   ├── audit.py                  # append-only JSONL audit log
+│   ├── scope.py                  # private-range target validator
+│   ├── registry.py               # the tool ROSTER + register_all wiring
+│   ├── whitelist.py              # device whitelist store + normalize_mac
+│   ├── watch.py                  # pure rogue-host diff (KNOWN/ROGUE/IP_MISMATCH/ABSENT)
+│   └── tools/
+│       ├── meta.py               # list_tools
+│       ├── nmap.py               # nmap_scan
+│       ├── masscan.py            # masscan_scan
+│       ├── tshark.py             # tshark_capture
+│       ├── arpscan.py            # arp_scan
+│       └── arpwatch.py           # arp_watch
+├── tests/                        # offline unit tests (run_tool monkeypatched)
+└── logs/audit.jsonl              # runtime audit log (gitignored)
+```
