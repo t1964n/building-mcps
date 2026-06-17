@@ -1,5 +1,8 @@
 # Runtime
 fastmcp>=2.0          # FastMCP server framework (pulls in pydantic, mcp)
+pyyaml>=6.0           # whitelist store parsing. Present transitively via fastmcp
+                      # today, but the whitelist loader relies on it directly, so
+                      # declare it explicitly rather than lean on a transitive dep.
 
 # Dev / test
 pytest>=8.0

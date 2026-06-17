@@ -1,0 +1,41 @@
+# Device whitelist — EXAMPLE (Phase 3, Task 3.2)
+#
+# This is the source of truth for "known, expected devices on Mark's LAN". Task 3.3
+# diffs a live arp-scan against it and flags anything NOT listed here as a possible
+# rogue host. So an honest, complete whitelist is what makes that watcher trustworthy
+# (CLAUDE.md §2): a device missing here will look like a rogue; a typo'd MAC will make
+# a real device look rogue. Keep it accurate.
+#
+# HOW TO USE:
+#   cp whitelist.example.yaml whitelist.yaml      # your REAL inventory
+#   # edit whitelist.yaml with your real devices (MAC + name, IP/note optional)
+# whitelist.yaml is gitignored, so your real device inventory is NEVER committed.
+# This .example stays committed with placeholder MACs only.
+#
+# SCHEMA — `devices:` is a list; each entry is:
+#   mac:   REQUIRED. Any common form is accepted and normalised to lowercase-colon
+#          (aa:bb:cc:dd:ee:ff). AA-BB-CC-DD-EE-FF, AABB.CCDD.EEFF and uppercase all work.
+#   name:  REQUIRED. Human label.
+#   ip:    OPTIONAL. Only if the device has a static/reserved address; omit for DHCP.
+#   note:  OPTIONAL. Free-text annotation.
+#
+# The MACs below are deliberate PLACEHOLDERS (AA:BB:CC:...), not real hardware.
+
+devices:
+  - mac: "AA:BB:CC:00:00:01"
+    name: "Example Router (ASUS DSL-AX82U)"
+    ip: "192.168.51.1"
+    note: "Gateway / AP — static. Replace with your real router's BSSID."
+
+  - mac: "AA-BB-CC-00-00-02"          # hyphen form — normalises to aa:bb:cc:00:00:02
+    name: "Example Phone (Pixel 7a)"
+    note: "DHCP, no fixed IP — IP intentionally omitted."
+
+  - mac: "AABB.CC00.0003"             # Cisco dot form — normalises the same way
+    name: "Example Smart Cam (Ring Spotlight R1)"
+    ip: "192.168.51.40"
+    note: "OUI may resolve to a chipset vendor (e.g. TI), not 'Ring' — annotate so it isn't mistaken for a rogue."
+
+  - mac: "aa:bb:cc:00:00:04"
+    name: "Example Laptop (ThinkPad)"
+    note: "DHCP."

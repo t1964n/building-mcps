@@ -8,3 +8,7 @@ venv/
 
 # Runtime audit logs — never commit captured command history
 logs/
+
+# Mark's REAL device inventory — never commit his actual MAC/IP whitelist.
+# Only whitelist.example.yaml (placeholder MACs) is committed.
+whitelist.yaml
