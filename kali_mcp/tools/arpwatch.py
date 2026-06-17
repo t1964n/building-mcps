@@ -27,6 +27,7 @@ HONESTY GUARDS this tool must never break (CLAUDE.md §2 — it's an alerting su
 
 from __future__ import annotations
 
+from ..state import save_last_watch
 from ..watch import diff_against_whitelist
 from ..whitelist import WhitelistError, load_whitelist
 from . import arpscan
@@ -100,6 +101,17 @@ async def watch(
         "command": scan_result.get("command"),
         "raw_output": scan_result.get("raw_output"),
     }
+
+    # Persist this REAL watch so the Phase-4 dashboard (network_status / 4.1) can read
+    # the last rogue-host verdict WITHOUT re-running a scan (CLAUDE.md §2: the UI reads
+    # produced state, never fabricates one). Best-effort: a state-write failure must
+    # never turn a successful, honest scan into an error — the verdict above is the
+    # real result regardless of whether it got cached for the dashboard.
+    try:
+        save_last_watch(result)
+    except OSError:
+        pass
+
     return result
 
 

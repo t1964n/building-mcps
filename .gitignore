@@ -12,3 +12,7 @@ logs/
 # Mark's REAL device inventory — never commit his actual MAC/IP whitelist.
 # Only whitelist.example.yaml (placeholder MACs) is committed.
 whitelist.yaml
+
+# Persisted last rogue-host watch (state/last_watch.json) — can contain Mark's
+# real device IP/MAC data; the dashboard reads it but it is never committed.
+state/
