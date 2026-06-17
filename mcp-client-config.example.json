@@ -1,0 +1,60 @@
+{
+  "_comment": [
+    "EXAMPLE MCP client config for the Kali MCP Server (Phase 3, Task 3.1).",
+    "Copy the relevant entry into your real client config (see CONNECTING.md for",
+    "exact paths), then restart the client. There are NO secrets in this file —",
+    "it stays an .example only so you copy it to the client's own location.",
+    "",
+    "Both entries launch the SAME image (kali-mcp:phase1) and speak MCP over the",
+    "container's stdio (CLAUDE.md §4: stdio transport, no network port opened).",
+    "The ONLY difference is the container's network stack:",
+    "",
+    "  kali-mcp      — bridge/default (isolated). Loopback + self-tests. On bridge,",
+    "                  host-discovery to LAN hosts is filtered, so your own router",
+    "                  reads 'down' (NETWORKING.md). Use this unless you are",
+    "                  scanning the real LAN.",
+    "",
+    "  kali-mcp-lan  — real-LAN (host networking, --network host). The container",
+    "                  shares the host's network stack, so nmap/masscan/arp-scan",
+    "                  see your actual devices. EXPLICIT opt-in: it removes the",
+    "                  bridge isolation layer. Use ONLY for real network scans.",
+    "",
+    "Both get --cap-add NET_RAW/NET_ADMIN (CLAUDE.md §4) so non-root raw-socket",
+    "scans/captures work; scope.py still gates every target to private ranges in",
+    "BOTH modes. Add only the entry you need — you do not need both."
+  ],
+  "mcpServers": {
+    "kali-mcp": {
+      "command": "docker",
+      "args": [
+        "run",
+        "-i",
+        "--rm",
+        "--cap-add",
+        "NET_RAW",
+        "--cap-add",
+        "NET_ADMIN",
+        "kali-mcp:phase1",
+        "python",
+        "server.py"
+      ]
+    },
+    "kali-mcp-lan": {
+      "command": "docker",
+      "args": [
+        "run",
+        "-i",
+        "--rm",
+        "--network",
+        "host",
+        "--cap-add",
+        "NET_RAW",
+        "--cap-add",
+        "NET_ADMIN",
+        "kali-mcp:phase1",
+        "python",
+        "server.py"
+      ]
+    }
+  }
+}
