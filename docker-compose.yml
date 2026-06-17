@@ -1,18 +1,60 @@
-# Kali MCP Server — Phase 1 compose.
+# Kali MCP Server — compose.
 #
-# CLAUDE.md §4: local/stdio only. We do NOT publish any port and do NOT use
-# privileged: true. cap_add (NET_RAW/NET_ADMIN) is forward-prep for the scan and
-# capture tools in Tasks 1.3/1.4 — harmless for list_tools, and far short of root.
+# TWO run modes, one image (CLAUDE.md §3 scope + §4 locked decisions):
+#
+#   * DEFAULT = bridge (isolated). `docker compose run --rm kali-mcp` keeps the
+#     container on Docker's bridge network — one extra layer of isolation from the
+#     host LAN. Safe default. KNOWN LIMITATION (Phase 1, reconfirmed Task 2.2): on
+#     bridge, nmap host-discovery probes to the LAN gateway are filtered, so your
+#     own router reads "down" and never gets scanned. Bridge is for loopback /
+#     self-tests, not for surveying the real LAN.
+#
+#   * OPT-IN real-LAN = `kali-mcp-lan`, network_mode: host (profile `lan`). Run with
+#       docker compose --profile lan run --rm kali-mcp-lan
+#     The container shares the host's network stack, so nmap/tshark see the real LAN
+#     exactly as the host does — your own devices become scannable. This is an
+#     EXPLICIT opt-in because host networking removes the bridge isolation layer.
+#
+# WHY that tradeoff is acceptable HERE (record the reasoning, §2 — don't bury it):
+#   1. The MCP control channel is STDIO, not a network port, so host networking is
+#      NOT needed to talk to the server — only for the scan traffic itself.
+#   2. §3 scope enforcement (scope.py) gates EVERY target to private ranges in BOTH
+#      modes. "Sees the LAN" never becomes "can hit the internet unchecked" — host
+#      mode gives more reach, NOT a weaker gate. (Verified: 8.8.8.8 still refused.)
+#   3. This is a tool you deliberately run to scan your OWN network (§3), on a
+#      single-operator lab. macvlan was considered and rejected for now: host net is
+#      simpler and sufficient for one operator. Revisit macvlan only if we need the
+#      container to own a distinct LAN IP without the host's full stack.
+#
+# HONEST NOTE: under network_mode: host, Docker IGNORES published `ports:` (there is
+# no port mapping — the container binds host ports directly). We publish none, so
+# nothing changes for us, but it's called out so it isn't surprising later. cap_add
+# (NET_RAW/NET_ADMIN) is orthogonal to the network namespace and still applies in
+# host mode — combined with the §2.1 setcaps baked into the image, non-root raw
+# scans/captures work in both modes.
+
+# Shared config for both services — same image, same caps, same stdio attach.
+x-kali-common: &kali-common
+  build: .
+  image: kali-mcp:phase1
+  stdin_open: true   # MCP speaks over stdio; keep stdin open for a client to attach.
+  tty: true
+  cap_add:
+    - NET_RAW
+    - NET_ADMIN
+  # Deliberately absent: `ports:` (no 0.0.0.0 exposure) and `privileged: true`.
+
 services:
+  # DEFAULT — bridge network (isolated). Runs on a plain `docker compose run`.
   kali-mcp:
-    build: .
-    image: kali-mcp:phase1
+    <<: *kali-common
     container_name: kali-mcp
-    # MCP speaks over stdio; keep stdin open so a client can attach
-    # (e.g. `docker compose run --rm kali-mcp`).
-    stdin_open: true
-    tty: true
-    cap_add:
-      - NET_RAW
-      - NET_ADMIN
-    # Deliberately absent: `ports:` (no 0.0.0.0 exposure) and `privileged: true`.
+    # (default bridge network — no network_mode override)
+
+  # OPT-IN — real-LAN. Only starts with `--profile lan`, so `docker compose up`/run
+  # without the profile NEVER puts the container on the host network by accident.
+  kali-mcp-lan:
+    <<: *kali-common
+    container_name: kali-mcp-lan
+    profiles: ["lan"]
+    network_mode: host
