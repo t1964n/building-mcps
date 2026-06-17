@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Kali MCP — Network Status</title>
+<!--
+  Phase 4, Task 4.2 — the dashboard SHELL. High-contrast dark-terminal UI.
+  Self-contained: inline CSS + JS, no CDN, no external fonts, no network calls.
+  Works opened straight from file://. render(snapshot) takes a network_status-shaped
+  object (Task 4.1 contract) and populates the DOM — 4.3 swaps the mock for the real tool.
+
+  ACCESSIBILITY IS THE SPEC (operator has a vision impairment): large monospace text,
+  AAA-level contrast (bright fg on near-black), and STATUS NEVER BY COLOUR ALONE — every
+  status carries a symbol + text label so it reads without colour perception.
+
+  §2-in-UI: "all clear" (green), "no data" (neutral grey/amber info), and "broken"
+  (amber/red error) are three VISUALLY DISTINCT states. A green light is shown ONLY for
+  an earned all-clear, never because data failed to load.
+-->
+<style>
+  :root {
+    /* Near-black terminal background, near-white foreground -> ~17:1, well past AAA. */
+    --bg: #0a0e14;
+    --panel: #0d1117;
+    --panel-2: #11161f;
+    --border: #2a3343;
+    --fg: #f0f6fc;          /* primary text: bright, bold-friendly */
+    --fg-dim: #c9d1d9;      /* secondary text: still >7:1 on --bg, NOT mid-grey */
+    /* Strong, saturated status palette — distinct in hue AND paired with labels/symbols. */
+    --green: #3fb950;
+    --red: #f85149;
+    --amber: #d29922;
+    --blue: #79c0ff;
+    --grey: #8b949e;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: ui-monospace, "Cascadia Code", "Cascadia Mono", "Source Code Pro",
+                 Consolas, "DejaVu Sans Mono", monospace;
+    font-size: 19px;           /* base >= 18px requirement */
+    line-height: 1.6;
+  }
+
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 28px 22px 80px; }
+
+  /* ---- header ---- */
+  header.site {
+    border-bottom: 3px solid var(--border);
+    padding-bottom: 18px;
+    margin-bottom: 28px;
+  }
+  header.site h1 {
+    font-size: 2.1rem;
+    margin: 0 0 6px;
+    letter-spacing: 0.5px;
+  }
+  header.site h1 .prompt { color: var(--green); }
+  .asof {
+    font-size: 1.05rem;
+    color: var(--fg-dim);
+    font-weight: 700;
+  }
+  .asof .live-note {
+    color: var(--amber);
+    margin-left: 10px;
+  }
+
+  /* mock switcher (shell-only convenience; harmless once 4.3 wires real data) */
+  .switcher {
+    margin-top: 14px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    font-size: 0.95rem;
+  }
+  .switcher a {
+    color: var(--blue);
+    border: 2px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 12px;
+    text-decoration: none;
+    font-weight: 700;
+  }
+  .switcher a.active { border-color: var(--blue); background: #16202e; }
+  .switcher a:hover { border-color: var(--blue); }
+
+  /* ---- panels ---- */
+  section.panel {
+    background: var(--panel);
+    border: 2px solid var(--border);
+    border-radius: 10px;
+    padding: 22px 24px;
+    margin-bottom: 26px;
+  }
+  section.panel > h2 {
+    font-size: 1.45rem;
+    margin: 0 0 16px;
+    padding-bottom: 10px;
+    border-bottom: 2px solid var(--border);
+  }
+
+  /* ---- network headline states (the loudest part of the page) ---- */
+  .net {
+    border-radius: 10px;
+    padding: 22px 24px;
+    border-left-width: 12px;
+    border-left-style: solid;
+  }
+  .net .net-headline {
+    font-size: 1.9rem;
+    font-weight: 800;
+    margin: 0 0 10px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+  .net .net-sub { font-size: 1.1rem; color: var(--fg); margin: 0; }
+  .net .symbol { font-size: 2.1rem; line-height: 1; }
+
+  /* ROGUE — must be the loudest element on the page when present. */
+  .net.is-rogue {
+    background: #2d1011;
+    border-left-color: var(--red);
+    box-shadow: 0 0 0 2px var(--red) inset;
+  }
+  .net.is-rogue .net-headline { color: var(--red); }
+
+  /* earned all-clear — green, and ONLY here. */
+  .net.is-clear { background: #0f2417; border-left-color: var(--green); }
+  .net.is-clear .net-headline { color: var(--green); }
+
+  /* review: 0 rogues but IP mismatch -> amber, not a green pass. */
+  .net.is-review { background: #2a2310; border-left-color: var(--amber); }
+  .net.is-review .net-headline { color: var(--amber); }
+
+  /* no data — NEUTRAL info, deliberately NOT green. The §2 visual rule. */
+  .net.is-nodata { background: #161b22; border-left-color: var(--grey); }
+  .net.is-nodata .net-headline { color: var(--blue); }
+
+  /* whitelist broken -> distinct error state. */
+  .net.is-broken { background: #2a2310; border-left-color: var(--amber); }
+  .net.is-broken .net-headline { color: var(--amber); }
+
+  /* ---- status count badges (summary) ---- */
+  .badges { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 18px; }
+  .badge {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    border: 2px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 16px;
+    background: var(--panel-2);
+    font-weight: 700;
+  }
+  .badge .num { font-size: 1.6rem; font-weight: 800; }
+  .badge .lbl { font-size: 1.0rem; letter-spacing: 0.5px; }
+  .s-known   { color: var(--green); }
+  .s-rogue   { color: var(--red); }
+  .s-mismatch{ color: var(--amber); }
+  .s-absent  { color: var(--blue); }
+
+  /* rogue device list */
+  .rogue-list { margin: 18px 0 0; padding: 0; list-style: none; }
+  .rogue-list li {
+    border: 2px solid var(--red);
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin-bottom: 12px;
+    background: #1c0d0e;
+  }
+  .rogue-list .tag {
+    color: var(--red);
+    font-weight: 800;
+    margin-right: 12px;
+  }
+  .rogue-list code { color: var(--fg); font-size: 1.05rem; }
+  .kv { color: var(--fg-dim); }
+
+  /* ---- tools grid ---- */
+  .counts { font-size: 1.15rem; margin: 0 0 16px; font-weight: 700; }
+  .counts strong { color: var(--blue); }
+  .tool-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+    gap: 10px;
+  }
+  .tool {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    border: 2px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 14px;
+    background: var(--panel-2);
+  }
+  .tool .mark { font-weight: 800; font-size: 1.1rem; }
+  .tool.installed .mark { color: var(--green); }
+  .tool.missing .mark { color: var(--grey); }
+  .tool .tname { font-weight: 700; }
+  .tool .tcat { color: var(--fg-dim); font-size: 0.9rem; margin-left: auto; }
+  .tool.missing .tname { color: var(--fg-dim); }
+
+  /* ---- audit ---- */
+  .audit-tallies { display: flex; flex-wrap: wrap; gap: 14px; margin: 0 0 18px; }
+  .recent { margin: 0; padding: 0; list-style: none; }
+  .recent li {
+    display: grid;
+    grid-template-columns: 1.2fr 1.4fr auto auto;
+    gap: 14px;
+    align-items: baseline;
+    padding: 9px 12px;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.98rem;
+  }
+  .recent li:nth-child(odd) { background: var(--panel-2); }
+  .recent .r-tool { font-weight: 800; }
+  .recent .r-target { color: var(--fg-dim); }
+  .recent .r-time { color: var(--fg-dim); font-size: 0.85rem; }
+  .pill {
+    font-weight: 800;
+    padding: 1px 10px;
+    border-radius: 999px;
+    border: 2px solid currentColor;
+    font-size: 0.85rem;
+    white-space: nowrap;
+  }
+  .pill.ok { color: var(--green); }
+  .pill.nonzero_exit { color: var(--red); }
+  .pill.timeout { color: var(--amber); }
+  .pill.not_found { color: var(--blue); }
+
+  /* ---- empty / unavailable states ---- */
+  .empty {
+    border: 2px dashed var(--grey);
+    border-radius: 8px;
+    padding: 18px 20px;
+    background: var(--panel-2);
+    color: var(--fg);
+    font-weight: 700;
+  }
+  .empty .symbol { color: var(--blue); margin-right: 10px; font-size: 1.3rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="site">
+    <h1><span class="prompt">&gt;_</span> Kali&nbsp;MCP — Network Status</h1>
+    <div class="asof" id="asof">as of —</div>
+    <nav class="switcher" id="switcher" aria-label="Mock state switcher"></nav>
+  </header>
+
+  <!-- 2. Network headline (rendered into here) -->
+  <section class="panel" aria-labelledby="net-h">
+    <h2 id="net-h">Network</h2>
+    <div id="network"></div>
+  </section>
+
+  <!-- 3. Tools -->
+  <section class="panel" aria-labelledby="tools-h">
+    <h2 id="tools-h">Tools</h2>
+    <p class="counts" id="tool-counts"></p>
+    <div class="tool-grid" id="tool-grid"></div>
+  </section>
+
+  <!-- 4. Audit activity -->
+  <section class="panel" aria-labelledby="audit-h">
+    <h2 id="audit-h">Audit activity</h2>
+    <div id="audit"></div>
+  </section>
+</div>
+
+<!-- Mock fixtures: 4.3 replaces this with the live network_status output. -->
+<script src="mock_snapshots.js"></script>
+<script>
+  "use strict";
+
+  // Minimal HTML-escape so any string from the payload is rendered as text, never markup.
+  function esc(s) {
+    if (s === null || s === undefined) return "";
+    return String(s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  // ---- the single render entry point: snapshot in -> DOM out (pure-ish) ----
+  function render(snapshot) {
+    renderHeader(snapshot);
+    renderNetwork(snapshot.network, snapshot.whitelist);
+    renderTools(snapshot.tools, snapshot.tool_counts);
+    renderAudit(snapshot.audit);
+  }
+
+  function renderHeader(snapshot) {
+    var asof = document.getElementById("asof");
+    asof.innerHTML =
+      "as of <strong>" + esc(snapshot.generated_at) + "</strong>" +
+      '<span class="live-note">(snapshot — not live)</span>';
+  }
+
+  // The §2 heart of the UI: pick exactly one visually-distinct network state.
+  function renderNetwork(net, whitelist) {
+    var el = document.getElementById("network");
+
+    // (c) whitelist broken takes precedence: there is no trustworthy verdict to give.
+    if (whitelist && whitelist.loaded === false) {
+      el.innerHTML =
+        '<div class="net is-broken">' +
+          '<p class="net-headline"><span class="symbol">⚠</span> WHITELIST ERROR</p>' +
+          '<p class="net-sub">No rogue verdict can be trusted until the whitelist loads. ' +
+          'This is NOT an all-clear and NOT a rogue count.</p>' +
+          '<p class="net-sub" style="margin-top:12px"><code>' + esc(whitelist.error) + '</code></p>' +
+        "</div>";
+      return;
+    }
+
+    // (b) no data: scan never run. NEUTRAL — must not look like a pass.
+    if (!net || net.available === false) {
+      el.innerHTML =
+        '<div class="net is-nodata">' +
+          '<p class="net-headline"><span class="symbol">ⓘ</span> NO SCAN DATA</p>' +
+          '<p class="net-sub">' + esc(net && net.note ? net.note : "No rogue-host scan has been run yet.") + '</p>' +
+          '<p class="net-sub" style="margin-top:8px;color:var(--fg-dim)">Run <code>arp_watch</code> to populate this panel.</p>' +
+        "</div>";
+      return;
+    }
+
+    var s = net.summary || { known: 0, rogue: 0, ip_mismatch: 0, absent: 0 };
+    var badges =
+      '<div class="badges">' +
+        badge("s-known", "✓ KNOWN", s.known) +
+        badge("s-rogue", "⚠ ROGUE", s.rogue) +
+        badge("s-mismatch", "≠ IP MISMATCH", s.ip_mismatch) +
+        badge("s-absent", "○ ABSENT", s.absent) +
+      "</div>";
+
+    // (a-rogue) rogues present: the loudest state on the page.
+    if (s.rogue > 0) {
+      var rogueItems = (net.rogues || []).map(function (r) {
+        return '<li><span class="tag">⚠ ROGUE</span>' +
+          '<code>' + esc(r.ip || "?") + '</code> ' +
+          '<span class="kv">mac</span> <code>' + esc(r.mac || "?") + '</code> ' +
+          '<span class="kv">vendor</span> <code>' + esc(r.vendor || "(unknown)") + '</code></li>';
+      }).join("");
+      el.innerHTML =
+        '<div class="net is-rogue" role="alert">' +
+          '<p class="net-headline"><span class="symbol">⚠</span> ' + esc(s.rogue) +
+            ' ROGUE DEVICE' + (s.rogue === 1 ? "" : "S") + ' ON THE SEGMENT</p>' +
+          '<p class="net-sub">' + esc(net.note || "Unlisted device(s) detected.") + '</p>' +
+          badges +
+          '<ul class="rogue-list">' + rogueItems + "</ul>" +
+        "</div>";
+      return;
+    }
+
+    // (a-clear) earned all-clear: GREEN, only here.
+    if (net.all_clear === true) {
+      el.innerHTML =
+        '<div class="net is-clear">' +
+          '<p class="net-headline"><span class="symbol">✓</span> ALL CLEAR — EVERY DEVICE KNOWN</p>' +
+          '<p class="net-sub">' + esc(net.note || "All discovered devices matched the whitelist.") + '</p>' +
+          badges +
+        "</div>";
+      return;
+    }
+
+    // 0 rogues but not an earned clear (e.g. IP mismatch) -> amber review, not green.
+    el.innerHTML =
+      '<div class="net is-review">' +
+        '<p class="net-headline"><span class="symbol">≠</span> REVIEW — 0 ROGUES, BUT NOT A CLEAN MATCH</p>' +
+        '<p class="net-sub">' + esc(net.note || "Some devices need review.") + '</p>' +
+        badges +
+      "</div>";
+  }
+
+  function badge(cls, label, num) {
+    return '<div class="badge ' + cls + '">' +
+      '<span class="num">' + esc(num) + '</span>' +
+      '<span class="lbl">' + esc(label) + "</span></div>";
+  }
+
+  function renderTools(tools, counts) {
+    tools = tools || [];
+    counts = counts || { registered: tools.length, installed: 0 };
+    document.getElementById("tool-counts").innerHTML =
+      "Registered <strong>" + esc(counts.registered) + "</strong> · " +
+      "Installed <strong>" + esc(counts.installed) + "</strong> · " +
+      "Missing <strong>" + esc(counts.registered - counts.installed) + "</strong>";
+
+    document.getElementById("tool-grid").innerHTML = tools.map(function (t) {
+      var on = t.installed === true;
+      return '<div class="tool ' + (on ? "installed" : "missing") + '" ' +
+        'title="' + esc(t.purpose) + '">' +
+        '<span class="mark">' + (on ? "✓" : "✗") + "</span>" +
+        '<span class="tname">' + esc(t.name) + "</span>" +
+        '<span class="tcat">' + esc(t.category) + "</span></div>";
+    }).join("");
+  }
+
+  function renderAudit(audit) {
+    var el = document.getElementById("audit");
+    if (!audit || audit.available === false) {
+      el.innerHTML =
+        '<div class="empty"><span class="symbol">ⓘ</span>' +
+        esc(audit && audit.note ? audit.note : "No audit log yet — it appears once a tool runs.") +
+        "</div>";
+      return;
+    }
+
+    var bs = audit.by_status || {};
+    var tallies = '<div class="audit-tallies">' +
+      badgePill("ok", "✓ ok", bs.ok || 0) +
+      badgePill("nonzero_exit", "✗ nonzero", bs.nonzero_exit || 0) +
+      badgePill("timeout", "⏱ timeout", bs.timeout || 0) +
+      badgePill("not_found", "∅ not found", bs.not_found || 0) +
+      "</div>";
+
+    var total = '<p class="counts">Total entries <strong>' + esc(audit.total_entries) + "</strong>" +
+      (audit.unparseable_lines ? ' · <span style="color:var(--amber)">' +
+        esc(audit.unparseable_lines) + " unparseable line(s)</span>" : "") +
+      "</p>";
+
+    var recent = (audit.recent || []);
+    var rows = recent.length
+      ? recent.slice().reverse().map(function (r) {
+          return "<li>" +
+            '<span class="r-tool">' + esc(r.tool) + "</span>" +
+            '<span class="r-target">' + esc(r.target === null ? "—" : r.target) + "</span>" +
+            '<span class="pill ' + esc(r.status) + '">' + esc(r.status) + "</span>" +
+            '<span class="r-time">' + esc(r.timestamp) + "</span>" +
+          "</li>";
+        }).join("")
+      : '<li><span class="r-target">No recent runs recorded.</span></li>';
+
+    el.innerHTML = total + tallies + '<ul class="recent">' + rows + "</ul>";
+  }
+
+  function badgePill(statusClass, label, num) {
+    return '<div class="badge"><span class="num pill ' + statusClass + '" ' +
+      'style="border:none;padding:0">' + esc(num) + "</span>" +
+      '<span class="lbl">' + esc(label) + "</span></div>";
+  }
+
+  // ---- bootstrap: pick a mock via ?mock=<key>, render it, build the switcher ----
+  (function init() {
+    var snaps = window.MOCK_SNAPSHOTS || {};
+    var keys = Object.keys(snaps);
+    var params = new URLSearchParams(location.search);
+    var key = params.get("mock");
+    if (!snaps[key]) key = keys[0] || null;
+
+    // switcher links (shell-only; lets the operator eyeball every honest state)
+    var nav = document.getElementById("switcher");
+    nav.innerHTML = keys.map(function (k) {
+      return '<a href="?mock=' + encodeURIComponent(k) + '"' +
+        (k === key ? ' class="active"' : "") + ">" + esc(k) + "</a>";
+    }).join("");
+
+    if (key) {
+      render(snaps[key]);
+    } else {
+      document.getElementById("network").innerHTML =
+        '<div class="empty">No mock snapshot found.</div>';
+    }
+  })();
+</script>
+</body>
+</html>
