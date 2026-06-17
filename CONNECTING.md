@@ -104,7 +104,7 @@ claude mcp add-json kali-mcp-lan '{"command":"docker","args":["run","-i","--rm",
 ## 4. Confirm the tools appear
 
 - **Claude Desktop:** the tools show under the 🔌 / tools menu. You should see
-  `list_tools`, `nmap_scan`, `masscan_scan`, `tshark_capture`, `arp_scan`.
+  `list_tools`, `nmap_scan`, `masscan_scan`, `tshark_capture`, `arp_scan`, `arp_watch`.
 - **Claude Code:** `claude mcp list` should show `kali-mcp` as connected; in-session,
   ask it to run `list_tools`.
 
