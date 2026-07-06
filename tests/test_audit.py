@@ -43,3 +43,37 @@ def test_each_invocation_appends_another_line(tmp_path, monkeypatch):
     assert len(lines) == 2
     statuses = [json.loads(line)["status"] for line in lines]
     assert statuses == ["ok", "not_found"]  # not_found is logged too
+
+
+def test_audit_write_failure_never_loses_the_real_result(tmp_path, monkeypatch, capsys):
+    """A failed audit write must NOT crash the call or discard the real output.
+
+    The command already ran; §2 says never lose a real result and never hide a
+    failure. So run_tool returns the real ToolResult with audit_error populated, and
+    shouts to stderr — it does not raise.
+    """
+    monkeypatch.setenv("KALI_MCP_AUDIT_LOG", str(tmp_path / "audit.jsonl"))
+
+    def _boom(_entry):
+        raise OSError("disk full")
+
+    # Patch the name run_tool actually calls (imported into the executor module).
+    monkeypatch.setattr("kali_mcp.executor.audit_log", _boom)
+
+    r = run_tool(["echo", "hi"], timeout_s=5, tool="echo", target="192.168.1.1")
+
+    # The real result survives intact...
+    assert r.status == "ok"
+    assert "hi" in r.stdout
+    # ...and the logging failure is surfaced, not swallowed.
+    assert r.audit_error is not None
+    assert "disk full" in r.audit_error
+    # ...and it was loud on stderr.
+    assert "AUDIT WRITE FAILED" in capsys.readouterr().err
+
+
+def test_audit_error_is_none_on_success(tmp_path, monkeypatch):
+    """The happy path leaves audit_error as None — the 'this run WAS logged' signal."""
+    monkeypatch.setenv("KALI_MCP_AUDIT_LOG", str(tmp_path / "audit.jsonl"))
+    r = run_tool(["echo", "ok"], timeout_s=5, tool="echo")
+    assert r.audit_error is None

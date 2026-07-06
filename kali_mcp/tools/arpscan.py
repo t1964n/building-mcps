@@ -183,6 +183,9 @@ async def scan(
         "command": result.command,
         "duration_s": result.duration_s,
     }
+    # An audit-write failure travels WITH the (real) result — surfaced, never hidden.
+    if result.audit_error is not None:
+        base["audit_error"] = result.audit_error
 
     if result.status == "not_found":
         return {**base, "status": "not_found", "ran": False,

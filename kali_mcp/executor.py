@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -37,6 +38,11 @@ class ToolResult:
     duration_s: float       # wall-clock via time.monotonic()
     parsed: dict | None = None  # ALWAYS None here; wrappers fill it later via
                                 # dataclasses.replace(...). Never invented.
+    audit_error: str | None = None  # None = this run WAS audit-logged. A string means
+                                    # the audit write FAILED — the command still ran and
+                                    # this result is real, but it may be unlogged. Never
+                                    # silently swallowed (CLAUDE.md §2/§3): the failure
+                                    # travels WITH the result so a wrapper can surface it.
 
 
 def _decode(raw: bytes | None) -> str:
@@ -48,6 +54,30 @@ def _decode(raw: bytes | None) -> str:
     if not raw:
         return ""
     return raw.decode("utf-8", errors="replace")
+
+
+def _audit(entry: dict) -> str | None:
+    """Write one audit line; return None on success, or an error string on failure.
+
+    The command has ALREADY run by the time we log it, so a failed audit write must
+    NEVER destroy the real result or masquerade as a tool crash (CLAUDE.md §2). Instead
+    we keep the result and carry the failure out on ToolResult.audit_error, AND shout to
+    stderr so the miss is loud in the container logs (CONNECTING.md: stderr is where the
+    operator sees server diagnostics). Breadth is deliberate: audit failure is almost
+    always OSError (disk full / read-only mount / permission), but ANYTHING that stops
+    the log from being written is a fact to surface, never one to swallow.
+    """
+    try:
+        audit_log(entry)
+        return None
+    except Exception as exc:  # noqa: BLE001 — see docstring: never let logging kill a real result
+        msg = (
+            f"AUDIT WRITE FAILED for tool={entry.get('tool')!r} "
+            f"target={entry.get('target')!r}: {type(exc).__name__}: {exc}. "
+            "The command ran and its result is real, but THIS RUN MAY BE UNLOGGED."
+        )
+        print(f"[kali-mcp] {msg}", file=sys.stderr, flush=True)
+        return msg
 
 
 def _kill_process_group(proc: subprocess.Popen) -> None:
@@ -82,7 +112,7 @@ def run_tool(
         """Build the ToolResult, audit it, and return it — the single exit path."""
         duration_s = time.monotonic() - start
         command = list(argv)
-        audit_log(
+        audit_error = _audit(
             {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "tool": tool,
@@ -100,6 +130,7 @@ def run_tool(
             stdout=stdout,
             stderr=stderr,
             duration_s=duration_s,
+            audit_error=audit_error,
         )
 
     try:
