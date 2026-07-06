@@ -79,7 +79,13 @@ exit as a clear failure:
   weaker *gate* (8.8.8.8 stays refused under `--network host`).
 - **Append-only audit log.** Every command run is logged as JSONL (tool, argv, target, exit code,
   duration, timestamp) to `logs/audit.jsonl` (override with `KALI_MCP_AUDIT_LOG`). No code path
-  bypasses it.
+  bypasses it. A **failed** audit write (disk full, read-only mount, permission) never discards the
+  real result or masquerades as a tool crash — the command's output is returned intact, the failure
+  is surfaced on the result (`audit_error`) and shouted to stderr, so a run that couldn't be logged
+  is loud rather than silent.
+- **DNS resolution off the event loop.** Scope validation of a hostname target does a blocking
+  `getaddrinfo`; like the tool subprocess itself, it runs in a worker thread so a slow/hung resolver
+  can't stall the MCP server.
 - **Input validation, no shell injection.** Inputs are Pydantic-validated and commands are built
   as argument lists — no `shell=True` with interpolated input.
 
@@ -282,7 +288,7 @@ Built one scoped task at a time; each commit on the branch is one task. Where th
 ## Tests
 
 ```sh
-python -m pytest -q     # 131 tests, all green
+python -m pytest -q     # 133 tests, all green
 ```
 
 The suite is **fully offline**: `run_tool` is monkeypatched with canned `ToolResult`s built from
