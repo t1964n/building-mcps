@@ -253,6 +253,22 @@ dashboard template + mock-state viewer are documented in
 
 ---
 
+## Desktop control panel
+
+A native **PySide6** GUI ([`desktop/`](./desktop/README.md)) is the operator-facing companion to
+the stdio MCP tools. It **displays** the honest platform state (the same rogue / all-clear /
+no-data / stale / whitelist-broken distinctions the dashboard enforces) and can **trigger**
+`arp_watch` on a chosen interface — through the *same* audited, scope-gated wrapper the MCP layer
+uses, run in the container, so scope validation + the audit log apply to a GUI-triggered scan
+exactly as to an MCP one. It's a **native window — no port, no server** (that's why a desktop app
+was chosen over a web UI: it keeps the §4 no-open-port rule intact). The logic lives in a Qt-free,
+fully-tested `backend.py`; the Qt layer is a thin view.
+
+```sh
+sudo apt-get install -y python3-pyside6.qtcore python3-pyside6.qtgui python3-pyside6.qtwidgets
+python3 -m desktop.app
+```
+
 ## Project status
 
 Built one scoped task at a time; each commit on the branch is one task. Where things stand:
@@ -318,6 +334,10 @@ error) — failure handling is treated as a feature, not an afterthought.
 │   ├── template.html             # self-contained dark-terminal dashboard + render()
 │   ├── mock_snapshots.js         # fixture states for the offline mock viewer
 │   └── README.md                 # dashboard shell + live-generation notes
+├── desktop/                      # native PySide6 control panel (display + trigger arp_watch)
+│   ├── backend.py                # Qt-free, tested core: snapshot + view-model + scan runner
+│   ├── app.py                    # thin PySide6 view
+│   └── README.md                 # run + architecture + accessibility notes
 ├── kali_mcp/
 │   ├── executor.py               # run_tool — the single faithful executor
 │   ├── audit.py                  # append-only JSONL audit log

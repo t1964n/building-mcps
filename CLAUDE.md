@@ -86,6 +86,29 @@ This is built into the server by design, so keep it built in:
 If something here is unclear, or you're about to make an architecture/security choice **not** listed
 above, stop and ask Mark before writing code.
 
+### Desktop control panel (locked decision, 2026-07-06)
+
+A native **PySide6 (Qt for Python)** desktop app under `desktop/` — the operator-facing GUI for
+this server. Locked properties; keep them built in:
+
+- **No network port. Ever.** It is a native window, not a served web app — this preserves the §4
+  "local/loopback only, no open port" decision. That is *why* a desktop app was chosen over a web
+  UI, not an accident.
+- **It never bypasses the gate.** The panel triggers a scan by invoking the SAME audited,
+  scope-gated tool wrapper (`kali_mcp.tools.*`, run inside the `kali-mcp` container via `docker
+  run`) that the MCP layer uses — never by building its own tool command. The scope gate and the
+  audit log apply to a GUI-triggered scan exactly as to an MCP-triggered one. Do not add a code
+  path that runs a tool binary directly from the GUI.
+- **Display reads produced state only.** The dashboard view reads `build_status()` (persisted
+  `state/` + audit log, read-only) — it does NOT scan to fill the screen. "No scan data" stays
+  visually distinct from "all clear" (the same §2 honesty the HTML dashboard enforces).
+- **Testable core, thin shell.** State-reading, the honest view-model reduction, and the
+  scan-runner are plain Python under pytest (injectable process runner — no Docker needed to test);
+  the Qt layer is a thin view with no business logic. Framework note: PySide6 is what's installed;
+  PyQt5 is a near-drop-in if ever needed.
+- **Accessibility carries over** from the HTML dashboard: high contrast, ≥19px, and status is
+  never colour alone — every state carries a symbol + text label.
+
 ---
 
 ## 5. Tools exposed
