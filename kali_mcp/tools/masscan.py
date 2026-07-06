@@ -174,7 +174,10 @@ async def scan(
 
     # 2. Scope gate FIRST. Denied -> refusal; masscan never runs, no argv built. CIDR
     #    composes: scope already rejects a range that touches public space.
-    sr = validate_target(inp.target)
+    #    Offloaded: a hostname target makes validate_target do a blocking getaddrinfo,
+    #    which must not stall the MCP event loop (run_tool is offloaded for the same
+    #    reason). An IP/CIDR target resolves instantly; the thread hop is negligible.
+    sr = await asyncio.to_thread(validate_target, inp.target)
     if not sr.allowed:
         return {
             "status": "scope_denied",
