@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Callable, Protocol
 
 from kali_mcp.dashboard import compute_network_staleness
+from kali_mcp.scope import validate_target
 from kali_mcp.status import build_status
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -148,6 +149,30 @@ def build_view_model(snapshot: dict, staleness: dict) -> ViewModel:
 ProcRunner = Callable[[list[str]], "subprocess.CompletedProcess[str]"]
 
 
+def normalize_range(raw: str | None) -> tuple[str | None, str | None]:
+    """Normalise + scope-check a GUI-entered target range. Returns (range, error) with
+    exactly one meaningful value.
+
+      * empty / whitespace  -> (None, None): scan the whole segment (--localnet), as today.
+      * a non-empty range   -> checked with the SAME scope gate the container enforces
+        (kali_mcp.scope.validate_target) so an out-of-scope CIDR is refused INSTANTLY with
+        the identical rule — this is NOT a second, divergent gate. The container's
+        ArpScanInput stays the authoritative boundary (defence in depth); this pre-check is
+        just fast, honest feedback so the operator isn't made to wait on a Docker spin-up
+        only to be told the range was never in scope.
+
+    A refusal returns (None, <reason>) and the caller must NOT run the scan — an out-of-scope
+    range is a refusal, never a tool error and never a fabricated 'nothing found'.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return None, None
+    sr = validate_target(text)
+    if not sr.allowed:
+        return None, f"range refused — out of scope: {sr.reason}"
+    return text, None
+
+
 @dataclass(frozen=True)
 class ScanOutcome:
     """The honest result of a GUI-triggered scan. ok=False ALWAYS carries a real error
@@ -216,7 +241,15 @@ class DockerScanRunner:
         ]
 
     def run_arp_watch(self, *, interface: str, target_range: str | None = None) -> ScanOutcome:
-        argv = self.build_argv(interface, target_range)
+        # Scope-check the range FIRST, with the same gate the container enforces. An
+        # out-of-scope range is refused here — no docker run, no fabricated result — so the
+        # operator gets an instant, honest reason instead of waiting on a container only to
+        # have ArpScanInput reject it. Empty/None -> whole segment (--localnet), unchanged.
+        rng, range_err = normalize_range(target_range)
+        if range_err is not None:
+            return ScanOutcome(False, None, range_err, [], None)
+
+        argv = self.build_argv(interface, rng)
         try:
             cp = self.proc_runner(argv)
         except FileNotFoundError:

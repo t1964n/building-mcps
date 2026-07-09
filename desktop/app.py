@@ -53,13 +53,18 @@ class ScanWorker(QThread):
 
     done = Signal(object)  # ScanOutcome
 
-    def __init__(self, runner: ScanRunner, interface: str) -> None:
+    def __init__(self, runner: ScanRunner, interface: str, target_range: str | None = None) -> None:
         super().__init__()
         self._runner = runner
         self._interface = interface
+        self._target_range = target_range
 
     def run(self) -> None:  # QThread entry point
-        outcome = self._runner.run_arp_watch(interface=self._interface)
+        # target_range is scope-checked inside run_arp_watch (off this UI thread), so an
+        # out-of-scope range comes back as an honest ScanOutcome error, never a freeze.
+        outcome = self._runner.run_arp_watch(
+            interface=self._interface, target_range=self._target_range
+        )
         self.done.emit(outcome)
 
 
@@ -102,6 +107,19 @@ class MainWindow(QMainWindow):
             "border-radius: 6px; padding: 6px 8px; }"
         )
         bar.addWidget(self.iface_edit)
+        bar.addWidget(self._muted_label("Range:"))
+        self.range_edit = QLineEdit()
+        self.range_edit.setFixedWidth(190)
+        self.range_edit.setPlaceholderText("whole segment (optional)")
+        self.range_edit.setStyleSheet(
+            f"QLineEdit {{ background: {_PANEL}; color: {_FG}; border: 1px solid #2b3546; "
+            "border-radius: 6px; padding: 6px 8px; } "
+            f"QLineEdit::placeholder {{ color: #5a6472; }}"
+        )
+        # Enter in either field triggers the scan — same as clicking the button.
+        self.iface_edit.returnPressed.connect(self._on_scan)
+        self.range_edit.returnPressed.connect(self._on_scan)
+        bar.addWidget(self.range_edit)
         self.scan_btn = QPushButton("▶  Run arp_watch")
         self.scan_btn.clicked.connect(self._on_scan)
         self.refresh_btn = QPushButton("⟳  Refresh")
@@ -249,10 +267,16 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------------- actions
     def _on_scan(self) -> None:
+        # A scan already in flight? Ignore re-triggers (button is disabled, but returnPressed
+        # can still fire) so we never start two workers over one another.
+        if self._worker is not None and self._worker.isRunning():
+            return
         iface = self.iface_edit.text().strip() or "wlan0"
+        target_range = self.range_edit.text().strip() or None
         self.scan_btn.setEnabled(False)
-        self.status_line.setText(f"running arp_watch on {iface} (through the audited container wrapper)…")
-        self._worker = ScanWorker(self._runner, iface)
+        where = f"{iface}, range {target_range}" if target_range else f"{iface} (whole segment)"
+        self.status_line.setText(f"running arp_watch on {where} (through the audited container wrapper)…")
+        self._worker = ScanWorker(self._runner, iface, target_range)
         self._worker.done.connect(self._on_scan_done)
         self._worker.start()
 

@@ -17,6 +17,7 @@ from desktop.backend import (
     DockerScanRunner,
     ScanOutcome,
     build_view_model,
+    normalize_range,
     _parse_verdict,
 )
 
@@ -150,3 +151,69 @@ def test_parse_verdict_ignores_noise_lines():
 def test_parse_verdict_empty_is_error():
     verdict, err = _parse_verdict("   ")
     assert verdict is None and "no output" in err
+
+
+# --------------------------------------------------------------- target-range input
+
+@pytest.mark.parametrize("raw", ["", "   ", None])
+def test_empty_range_means_whole_segment(raw):
+    # No range entered -> scan the whole segment; never treated as an error.
+    rng, err = normalize_range(raw)
+    assert rng is None and err is None
+
+
+@pytest.mark.parametrize("raw", ["192.168.50.0/24", "  10.0.0.0/8  ", "192.168.50.10"])
+def test_private_range_is_accepted_and_stripped(raw):
+    rng, err = normalize_range(raw)
+    assert err is None and rng == raw.strip()
+
+
+@pytest.mark.parametrize("raw", ["8.8.8.0/24", "100.64.0.0/10", "1.1.1.1", "not a cidr!"])
+def test_out_of_scope_range_is_refused(raw):
+    # Same scope gate the container enforces — a public/CGNAT/garbage range is refused
+    # here, with a reason, and yields no range to scan.
+    rng, err = normalize_range(raw)
+    assert rng is None and err is not None and "out of scope" in err
+
+
+class _Capture:
+    """A proc runner that records the argv it was handed and returns a canned clean scan."""
+
+    def __init__(self):
+        self.argv = None
+
+    def __call__(self, argv):
+        self.argv = argv
+        payload = json.dumps({"status": "ok", "verdict": "0 rogues"})
+        return _fake_cp(0, stdout=payload)
+
+
+def test_valid_range_is_passed_through_to_the_container():
+    cap = _Capture()
+    runner = DockerScanRunner(proc_runner=cap)
+    out = runner.run_arp_watch(interface="wlan0", target_range="192.168.50.0/24")
+    assert out.ok and out.error is None
+    # the (validated) range travels to the container as SCAN_RANGE, never spliced into code
+    assert "SCAN_RANGE=192.168.50.0/24" in cap.argv
+    script = cap.argv[cap.argv.index("-c") + 1]
+    assert "192.168.50.0/24" not in script
+
+
+def test_empty_range_scans_whole_segment_via_env():
+    cap = _Capture()
+    runner = DockerScanRunner(proc_runner=cap)
+    out = runner.run_arp_watch(interface="wlan0", target_range="   ")
+    assert out.ok
+    # whole-segment scan: SCAN_RANGE is present but empty (container -> None -> --localnet)
+    assert "SCAN_RANGE=" in cap.argv
+
+
+def test_out_of_scope_range_refuses_without_running_docker():
+    cap = _Capture()
+    runner = DockerScanRunner(proc_runner=cap)
+    out = runner.run_arp_watch(interface="wlan0", target_range="8.8.8.0/24")
+    assert out.ok is False
+    assert "out of scope" in out.error
+    assert out.verdict is None          # no fabricated result
+    assert cap.argv is None             # docker was NEVER invoked
+    assert out.command == []            # and no command was built

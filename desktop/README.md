@@ -17,12 +17,15 @@ than a local web dashboard.
   whitelist-broken states, device counts, the rogue hunt-list, staleness of the last
   scan, whitelist state, installed-tool count, and the recent audit tail. It **never
   scans to fill the screen** — "no scan data" stays visually distinct from "all clear".
-- **Triggers** `arp_watch` on a chosen interface, through the **same audited,
+- **Triggers** `arp_watch` on a chosen interface — and, optionally, a specific **target
+  range** (leave it blank to scan the whole segment) — through the **same audited,
   scope-gated wrapper** the MCP layer uses (run inside the `kali-mcp` container via
   `docker run`). The GUI builds no tool command of its own, so scope validation + the
-  audit log apply to a GUI-triggered scan exactly as to an MCP one. The scan runs on a
-  worker thread, so the window never freezes; a failed scan shows its **real error**,
-  never a fabricated "all clear".
+  audit log apply to a GUI-triggered scan exactly as to an MCP one. An out-of-scope range
+  is refused **before** any container runs, using the same scope gate the wrapper enforces
+  — so a public/CGNAT CIDR gets an instant, honest reason, not a fabricated result. The
+  scan runs on a worker thread, so the window never freezes; a failed scan shows its
+  **real error**, never a fabricated "all clear".
 
 ## Architecture (thin shell, testable core)
 
@@ -62,7 +65,9 @@ python3 -m desktop.app        # opens the native window
 ```
 
 The interface field defaults to `wlan0`; set it to your real LAN interface before
-hitting **Run arp_watch**. Use **Refresh** to re-read state without scanning.
+hitting **Run arp_watch**. Leave **Range** blank to scan the whole segment, or enter a
+private CIDR (e.g. `192.168.50.0/24`) to scan just that range — anything outside your
+private scope is refused. Use **Refresh** to re-read state without scanning.
 
 ## Accessibility
 
@@ -72,10 +77,11 @@ Carries over the HTML dashboard's rules: high contrast on near-black, ≥19px te
 
 ## Status — first vertical slice
 
-Done: the honest read-only display of all states + one working action (`arp_watch`)
-wired through the gated container wrapper, on a worker thread, with the backend fully
-under test. Natural next steps (not built yet): more actions (`nmap_scan` a selected
-host, `generate_dashboard`), a live rogue timeline, and auto-refresh.
+Done: the honest read-only display of all states + one working action (`arp_watch`,
+with an optional scope-checked target range) wired through the gated container wrapper,
+on a worker thread, with the backend fully under test. Natural next steps (not built
+yet): more actions (`nmap_scan` a selected host, `generate_dashboard`), a live rogue
+timeline, and auto-refresh.
 ```
 
 > Note: `state/` and `logs/` hold your real device data and are gitignored — the app
