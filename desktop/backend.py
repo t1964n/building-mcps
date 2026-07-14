@@ -45,6 +45,24 @@ _CONTAINER_SCRIPT = (
     "target_range=(os.environ.get('SCAN_RANGE') or None)))))"
 )
 
+# The same pattern for nmap: target / scan_type / ports arrive as env vars (NEVER
+# interpolated into code), and the audited + scope-gated nmap wrapper runs inside the
+# container. The wrapper's OWN scope gate + allow-list + audit log fire exactly as they
+# do for an MCP-triggered scan — the GUI builds no nmap command of its own.
+_NMAP_CONTAINER_SCRIPT = (
+    "import os, json, asyncio;"
+    "from kali_mcp.tools.nmap import scan;"
+    "print(json.dumps(asyncio.run(scan("
+    "target=os.environ['NMAP_TARGET'],"
+    "scan_type=os.environ['NMAP_SCAN_TYPE'],"
+    "ports=(os.environ.get('NMAP_PORTS') or None)))))"
+)
+
+# The scan_type allow-list, mirrored from kali_mcp.tools.nmap.SCAN_TYPES so the GUI can
+# populate a dropdown. The container's NmapInput remains the authoritative validator; a
+# bad value would be refused there as invalid_input, never run.
+NMAP_SCAN_TYPES = ("default", "ping", "quick", "connect", "syn", "version")
+
 
 def ensure_paths() -> None:
     """Pin the read-only state/audit/whitelist paths to the repo so the GUI works from
@@ -186,8 +204,27 @@ class ScanOutcome:
     returncode: int | None
 
 
+@dataclass(frozen=True)
+class NmapOutcome:
+    """The honest result of a GUI-triggered nmap scan. Unlike arp_watch there is no single
+    verdict — nmap returns hosts + open ports — so this carries the wrapper's own honest
+    `summary` line plus the parsed `hosts`. ok=False ALWAYS carries a real error (out of
+    scope, docker missing, timeout, nmap non-zero exit, unparseable XML) and NO findings —
+    never a fabricated 'nothing open'. 'host down / no response' is a REAL ok result, not
+    an error, surfaced through `summary`."""
+
+    ok: bool
+    summary: str | None
+    hosts: list          # [{address, mac, state, ports:[{portid, protocol, state, service, ...}]}]
+    open_ports: int | None
+    error: str | None
+    command: list[str]
+    returncode: int | None
+
+
 class ScanRunner(Protocol):
     def run_arp_watch(self, *, interface: str, target_range: str | None = None) -> ScanOutcome: ...
+    def run_nmap(self, *, target: str, scan_type: str = "default", ports: str | None = None) -> NmapOutcome: ...
 
 
 def _default_proc_runner(argv: list[str]) -> "subprocess.CompletedProcess[str]":
@@ -216,6 +253,43 @@ def _parse_verdict(stdout: str) -> tuple[str | None, str | None]:
             return (obj.get("verdict") or "scan complete"), None
         return None, (obj.get("reason") or f"arp_watch did not return a clean result (status: {obj.get('status')!r})")
     return None, "could not parse a scan verdict from the scan output"
+
+
+def _last_json_obj(stdout: str) -> dict | None:
+    """Return the last line of stdout that parses as a JSON object, else None. The
+    container prints one JSON result object; any incidental leading output is ignored."""
+    for line in reversed((stdout or "").strip().splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        return obj
+    return None
+
+
+def _nmap_outcome_from_stdout(stdout: str, argv: list[str], returncode: int | None) -> NmapOutcome:
+    """Turn the container's nmap-result JSON into an honest NmapOutcome. A non-ok wrapper
+    status (scope_denied, not_found, nonzero_exit, timeout, parse_error, invalid_input) is
+    surfaced as its real reason — never a silently-swallowed 'nothing found' (CLAUDE.md §2)."""
+    obj = _last_json_obj(stdout)
+    if obj is None:
+        return NmapOutcome(False, None, [], None, "could not parse an nmap result from the scan output", argv, returncode)
+    if obj.get("status") == "ok":
+        parsed = obj.get("parsed") or {}
+        return NmapOutcome(
+            True,
+            obj.get("summary") or parsed.get("summary"),
+            parsed.get("hosts") or [],
+            parsed.get("open_ports"),
+            None,
+            argv,
+            returncode,
+        )
+    reason = obj.get("reason") or f"nmap did not return a clean result (status: {obj.get('status')!r})"
+    return NmapOutcome(False, None, [], None, reason, argv, returncode)
 
 
 @dataclass
@@ -265,3 +339,46 @@ class DockerScanRunner:
         if err is not None:
             return ScanOutcome(False, None, err, argv, cp.returncode)
         return ScanOutcome(True, verdict, None, argv, cp.returncode)
+
+    # -------------------------------------------------------------------- nmap
+    def build_nmap_argv(self, target: str, scan_type: str, ports: str | None) -> list[str]:
+        """The docker argv as a LIST (no shell). target / scan_type / ports travel as env
+        vars, NEVER interpolated into the in-container script — the same injection
+        discipline as the arp_watch path and the wrappers themselves."""
+        return [
+            "docker", "run", "--rm",
+            "--network", "host",
+            "--cap-add", "NET_RAW", "--cap-add", "NET_ADMIN",
+            "-e", f"NMAP_TARGET={target}",
+            "-e", f"NMAP_SCAN_TYPE={scan_type}",
+            "-e", f"NMAP_PORTS={ports or ''}",
+            "-v", f"{self.repo_root}:/app",
+            self.image, "python", "-c", _NMAP_CONTAINER_SCRIPT,
+        ]
+
+    def run_nmap(self, *, target: str, scan_type: str = "default", ports: str | None = None) -> NmapOutcome:
+        # Scope-check the target FIRST with the same gate the nmap wrapper enforces, so an
+        # out-of-scope target is refused instantly — no docker run, no fabricated finding.
+        # The container's nmap wrapper stays the authoritative gate (defence in depth); this
+        # is fast, honest feedback. A hostname target triggers a DNS lookup here, but this
+        # runs on the worker thread, never the UI thread.
+        target = (target or "").strip()
+        if not target:
+            return NmapOutcome(False, None, [], None, "no target given — enter an IP/host on your own network", [], None)
+        sr = validate_target(target)
+        if not sr.allowed:
+            return NmapOutcome(False, None, [], None, f"target refused — out of scope: {sr.reason}", [], None)
+
+        argv = self.build_nmap_argv(target, scan_type, (ports or "").strip() or None)
+        try:
+            cp = self.proc_runner(argv)
+        except FileNotFoundError:
+            return NmapOutcome(False, None, [], None, "docker was not found on PATH — is Docker installed and running?", argv, None)
+        except subprocess.TimeoutExpired:
+            return NmapOutcome(False, None, [], None, f"scan timed out after {DEFAULT_SCAN_TIMEOUT_S}s", argv, None)
+
+        if cp.returncode != 0:
+            err = (cp.stderr or "").strip() or f"docker exited with code {cp.returncode}"
+            return NmapOutcome(False, None, [], None, err, argv, cp.returncode)
+
+        return _nmap_outcome_from_stdout(cp.stdout or "", argv, cp.returncode)

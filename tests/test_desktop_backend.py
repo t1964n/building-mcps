@@ -15,9 +15,11 @@ import pytest
 
 from desktop.backend import (
     DockerScanRunner,
+    NmapOutcome,
     ScanOutcome,
     build_view_model,
     normalize_range,
+    _nmap_outcome_from_stdout,
     _parse_verdict,
 )
 
@@ -217,3 +219,133 @@ def test_out_of_scope_range_refuses_without_running_docker():
     assert out.verdict is None          # no fabricated result
     assert cap.argv is None             # docker was NEVER invoked
     assert out.command == []            # and no command was built
+
+
+# --------------------------------------------------------------- nmap action
+
+_NMAP_OK = {
+    "status": "ok",
+    "summary": "1 host(s) up, 2 open port(s)",
+    "parsed": {
+        "hosts": [
+            {
+                "address": "192.168.50.1",
+                "mac": "aa:bb:cc:dd:ee:ff",
+                "state": "up",
+                "ports": [
+                    {"portid": 22, "protocol": "tcp", "state": "open", "service": "ssh", "product": "OpenSSH", "version": "9.6"},
+                    {"portid": 53, "protocol": "tcp", "state": "closed", "service": "domain"},
+                    {"portid": 80, "protocol": "tcp", "state": "open", "service": "http", "product": None, "version": None},
+                ],
+            }
+        ],
+        "hosts_up": 1,
+        "open_ports": 2,
+    },
+}
+
+
+class _CaptureNmap:
+    """A proc runner that records the argv and returns a canned clean nmap result."""
+
+    def __init__(self, payload=None):
+        self.argv = None
+        self._payload = payload if payload is not None else _NMAP_OK
+
+    def __call__(self, argv):
+        self.argv = argv
+        return _fake_cp(0, stdout=json.dumps(self._payload))
+
+
+def test_nmap_success_returns_summary_and_open_ports():
+    cap = _CaptureNmap()
+    runner = DockerScanRunner(proc_runner=cap)
+    out = runner.run_nmap(target="192.168.50.1", scan_type="default")
+    assert out.ok and out.error is None
+    assert out.open_ports == 2
+    assert "2 open port(s)" in out.summary
+    # only the genuinely-open ports are surfaced by the view; the parsed hosts carry them all
+    assert out.hosts[0]["address"] == "192.168.50.1"
+
+
+def test_nmap_target_scan_type_ports_travel_as_env_not_code():
+    cap = _CaptureNmap()
+    runner = DockerScanRunner(proc_runner=cap)
+    runner.run_nmap(target="192.168.50.10", scan_type="syn", ports="22,80,443")
+    assert "NMAP_TARGET=192.168.50.10" in cap.argv
+    assert "NMAP_SCAN_TYPE=syn" in cap.argv
+    assert "NMAP_PORTS=22,80,443" in cap.argv
+    # target is NOT spliced into the python -c body (injection guard)
+    script = cap.argv[cap.argv.index("-c") + 1]
+    assert "192.168.50.10" not in script
+
+
+def test_nmap_empty_ports_means_default_via_env():
+    cap = _CaptureNmap()
+    runner = DockerScanRunner(proc_runner=cap)
+    runner.run_nmap(target="192.168.50.1", scan_type="quick", ports="   ")
+    assert "NMAP_PORTS=" in cap.argv  # present but empty -> container maps to None (nmap default)
+
+
+def test_nmap_out_of_scope_target_refuses_without_running_docker():
+    cap = _CaptureNmap()
+    runner = DockerScanRunner(proc_runner=cap)
+    out = runner.run_nmap(target="8.8.8.8", scan_type="default")
+    assert out.ok is False
+    assert "out of scope" in out.error
+    assert out.summary is None and out.hosts == []   # nothing fabricated
+    assert cap.argv is None                          # docker NEVER invoked
+    assert out.command == []
+
+
+def test_nmap_empty_target_is_refused():
+    cap = _CaptureNmap()
+    runner = DockerScanRunner(proc_runner=cap)
+    out = runner.run_nmap(target="   ", scan_type="default")
+    assert out.ok is False and "no target" in out.error
+    assert cap.argv is None
+
+
+def test_nmap_container_scope_denied_is_an_honest_error():
+    # An in-scope target passes the pre-check, but the container wrapper still refuses
+    # (e.g. a hostname that resolves out of scope). That must surface as its real reason.
+    payload = {"status": "scope_denied", "reason": "public/global (9.9.9.9) — outside your private scope, denied"}
+    runner = DockerScanRunner(proc_runner=lambda argv: _fake_cp(0, stdout=json.dumps(payload)))
+    out = runner.run_nmap(target="192.168.50.1", scan_type="default")
+    assert out.ok is False and "outside your private scope" in out.error
+    assert out.hosts == []  # never a fabricated finding
+
+
+def test_nmap_nonzero_docker_exit_is_honest():
+    runner = DockerScanRunner(proc_runner=lambda argv: _fake_cp(1, stderr="image not found"))
+    out = runner.run_nmap(target="192.168.50.1")
+    assert out.ok is False and "image not found" in out.error
+
+
+def test_nmap_docker_missing_is_reported_not_raised():
+    def _boom(argv):
+        raise FileNotFoundError("docker")
+    runner = DockerScanRunner(proc_runner=_boom)
+    out = runner.run_nmap(target="192.168.50.1")
+    assert out.ok is False and "docker" in out.error.lower()
+
+
+def test_nmap_timeout_is_reported_not_raised():
+    def _slow(argv):
+        raise subprocess.TimeoutExpired(cmd="docker", timeout=180)
+    runner = DockerScanRunner(proc_runner=_slow)
+    out = runner.run_nmap(target="192.168.50.1")
+    assert out.ok is False and "timed out" in out.error
+
+
+def test_nmap_host_down_is_a_real_ok_result_not_an_error():
+    payload = {"status": "ok", "summary": "host down / no response — 0 host(s) up of 1 in output",
+               "parsed": {"hosts": [{"address": "192.168.50.9", "state": "down", "ports": []}], "hosts_up": 0, "open_ports": 0}}
+    runner = DockerScanRunner(proc_runner=lambda argv: _fake_cp(0, stdout=json.dumps(payload)))
+    out = runner.run_nmap(target="192.168.50.9")
+    assert out.ok and "host down" in out.summary and out.open_ports == 0
+
+
+def test_nmap_unparseable_stdout_is_error_not_empty_result():
+    out = _nmap_outcome_from_stdout("some banner but no json", ["docker"], 0)
+    assert out.ok is False and "could not parse" in out.error

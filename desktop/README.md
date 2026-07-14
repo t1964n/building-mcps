@@ -26,6 +26,13 @@ than a local web dashboard.
   — so a public/CGNAT CIDR gets an instant, honest reason, not a fabricated result. The
   scan runs on a worker thread, so the window never freezes; a failed scan shows its
   **real error**, never a fabricated "all clear".
+- **Triggers** `nmap_scan` against a chosen target — pick a `scan_type` from the
+  allow-list dropdown (`default`/`ping`/`quick`/`connect`/`syn`/`version`) and optionally a
+  ports spec — through the **same scope-gated, audited wrapper** the MCP layer uses. The
+  target is scope-checked **before** any container runs, so a public/out-of-scope target is
+  refused instantly with a real reason, not scanned. The last result renders in its own
+  panel: open ports per host with service/version, honestly distinguishing "no scan yet",
+  "host down / no open ports", and "scan failed" — none is dressed up as another.
 
 ## Architecture (thin shell, testable core)
 
@@ -69,6 +76,11 @@ hitting **Run arp_watch**. Leave **Range** blank to scan the whole segment, or e
 private CIDR (e.g. `192.168.50.0/24`) to scan just that range — anything outside your
 private scope is refused. Use **Refresh** to re-read state without scanning.
 
+For **Run nmap**, enter a target (e.g. `192.168.50.1`), pick a scan type, and optionally
+a ports spec (`22,80,443` or `1-1024`); an out-of-scope target is refused before any
+container runs. Results — open ports per host with service/version — render in the
+**LAST NMAP SCAN** panel.
+
 ## Accessibility
 
 Carries over the HTML dashboard's rules: high contrast on near-black, ≥19px text, and
@@ -77,11 +89,11 @@ Carries over the HTML dashboard's rules: high contrast on near-black, ≥19px te
 
 ## Status — first vertical slice
 
-Done: the honest read-only display of all states + one working action (`arp_watch`,
-with an optional scope-checked target range) wired through the gated container wrapper,
-on a worker thread, with the backend fully under test. Natural next steps (not built
-yet): more actions (`nmap_scan` a selected host, `generate_dashboard`), a live rogue
-timeline, and auto-refresh.
+Done: the honest read-only display of all states + two working actions — `arp_watch`
+(with an optional scope-checked target range) and `nmap_scan` (target + allow-list scan
+type + optional ports) — both wired through the gated container wrapper on a worker
+thread, with the backend fully under test. Natural next steps (not built yet):
+`generate_dashboard` from the panel, a live rogue timeline, and auto-refresh.
 ```
 
 > Note: `state/` and `logs/` hold your real device data and are gitignored — the app

@@ -16,6 +16,7 @@ import sys
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -29,7 +30,14 @@ from PySide6.QtWidgets import (
 )
 
 from desktop import backend
-from desktop.backend import DockerScanRunner, ScanOutcome, ScanRunner, ViewModel
+from desktop.backend import (
+    NMAP_SCAN_TYPES,
+    DockerScanRunner,
+    NmapOutcome,
+    ScanOutcome,
+    ScanRunner,
+    ViewModel,
+)
 
 # Accessible palette — mirrors the HTML dashboard. Status is NEVER colour-alone: every
 # level pairs this colour with a symbol + text label (CLAUDE.md desktop decision).
@@ -68,6 +76,27 @@ class ScanWorker(QThread):
         self.done.emit(outcome)
 
 
+class NmapWorker(QThread):
+    """Runs one nmap scan off the UI thread; emits the honest NmapOutcome when done."""
+
+    done = Signal(object)  # NmapOutcome
+
+    def __init__(self, runner: ScanRunner, target: str, scan_type: str, ports: str | None) -> None:
+        super().__init__()
+        self._runner = runner
+        self._target = target
+        self._scan_type = scan_type
+        self._ports = ports
+
+    def run(self) -> None:  # QThread entry point
+        # The target is scope-checked inside run_nmap (off this UI thread) — an out-of-scope
+        # target comes back as an honest NmapOutcome error, never a freeze and never a run.
+        outcome = self._runner.run_nmap(
+            target=self._target, scan_type=self._scan_type, ports=self._ports
+        )
+        self.done.emit(outcome)
+
+
 def _panel(title: str) -> tuple[QFrame, QVBoxLayout]:
     frame = QFrame()
     frame.setStyleSheet(f"QFrame {{ background: {_PANEL}; border-radius: 8px; }}")
@@ -84,6 +113,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._runner = runner or DockerScanRunner()
         self._worker: ScanWorker | None = None
+        self._nmap_worker: NmapWorker | None = None
+        self._last_nmap: NmapOutcome | None = None
 
         self.setWindowTitle("Kali MCP — Network Watch")
         self.setStyleSheet(
@@ -135,6 +166,44 @@ class MainWindow(QMainWindow):
         bar.addStretch(1)
         outer.addLayout(bar)
 
+        # --- nmap action bar ------------------------------------------------------
+        # A second gated action: scan a chosen host/CIDR with nmap. The target is
+        # scope-checked before any container runs (out-of-scope -> instant honest refusal).
+        field_css = (
+            f"background: {_PANEL}; color: {_FG}; border: 1px solid #2b3546; "
+            "border-radius: 6px; padding: 6px 8px;"
+        )
+        nbar = QHBoxLayout()
+        nbar.addWidget(self._muted_label("nmap target:"))
+        self.nmap_target_edit = QLineEdit()
+        self.nmap_target_edit.setFixedWidth(180)
+        self.nmap_target_edit.setPlaceholderText("192.168.50.1")
+        self.nmap_target_edit.setStyleSheet(f"QLineEdit {{ {field_css} }}")
+        nbar.addWidget(self.nmap_target_edit)
+        nbar.addWidget(self._muted_label("type:"))
+        self.nmap_type_combo = QComboBox()
+        self.nmap_type_combo.addItems(list(NMAP_SCAN_TYPES))
+        self.nmap_type_combo.setStyleSheet(f"QComboBox {{ {field_css} }}")
+        nbar.addWidget(self.nmap_type_combo)
+        nbar.addWidget(self._muted_label("ports:"))
+        self.nmap_ports_edit = QLineEdit()
+        self.nmap_ports_edit.setFixedWidth(120)
+        self.nmap_ports_edit.setPlaceholderText("default")
+        self.nmap_ports_edit.setStyleSheet(f"QLineEdit {{ {field_css} }}")
+        nbar.addWidget(self.nmap_ports_edit)
+        self.nmap_btn = QPushButton("▶  Run nmap")
+        self.nmap_btn.clicked.connect(self._on_nmap)
+        self.nmap_btn.setStyleSheet(
+            f"QPushButton {{ background: {_PANEL}; color: {_FG}; border: 1px solid #2b3546; "
+            "border-radius: 6px; padding: 8px 14px; font-weight: 600; } "
+            "QPushButton:disabled { color: #5a6472; }"
+        )
+        self.nmap_target_edit.returnPressed.connect(self._on_nmap)
+        self.nmap_ports_edit.returnPressed.connect(self._on_nmap)
+        nbar.addWidget(self.nmap_btn)
+        nbar.addStretch(1)
+        outer.addLayout(nbar)
+
         # --- status banner --------------------------------------------------------
         self.stale_label = QLabel()
         self.stale_label.setVisible(False)
@@ -162,6 +231,10 @@ class MainWindow(QMainWindow):
         grid.addWidget(time_frame, 1, 1)
         outer.addLayout(grid)
 
+        # --- nmap result ----------------------------------------------------------
+        nmap_frame, self.nmap_lay = _panel("LAST NMAP SCAN (this session)")
+        outer.addWidget(nmap_frame)
+
         # --- rogues + activity (scrollable) --------------------------------------
         rogue_frame, self.rogue_lay = _panel("ROGUE DEVICES")
         outer.addWidget(rogue_frame)
@@ -176,7 +249,8 @@ class MainWindow(QMainWindow):
         self.status_line = self._muted_label("")
         outer.addWidget(self.status_line)
 
-        self.resize(920, 860)
+        self.apply_nmap_outcome(None)  # seed "no nmap scan run yet"
+        self.resize(960, 980)
 
     # ---------------------------------------------------------------- helpers
     def _muted_label(self, text: str) -> QLabel:
@@ -255,6 +329,36 @@ class MainWindow(QMainWindow):
         else:
             self._row(self.audit_lay, "no commands logged yet", color=_MUTED)
 
+    def apply_nmap_outcome(self, outcome: NmapOutcome | None) -> None:
+        """Render the last nmap scan honestly. No scan yet, a failed scan, and a clean
+        scan-with-no-open-ports are three DISTINCT states — none is dressed up as another."""
+        self._clear(self.nmap_lay)
+        if outcome is None:
+            self._row(self.nmap_lay, "no nmap scan run yet — enter a target and Run nmap", color=_MUTED)
+            return
+        if not outcome.ok:
+            # Honest failure: the real reason (out of scope, docker missing, nmap error), never
+            # a fabricated 'nothing open'.
+            self._row(self.nmap_lay, f"⚠  scan did NOT complete: {outcome.error}", color=_LEVEL_COLOR["rogue"])
+            return
+
+        self._row(self.nmap_lay, f"✓  {outcome.summary}", color=_LEVEL_COLOR["all_clear"])
+        any_open = False
+        for host in outcome.hosts:
+            open_ports = [p for p in (host.get("ports") or []) if p.get("state") == "open"]
+            if not open_ports:
+                continue
+            any_open = True
+            self._row(self.nmap_lay, f"  {host.get('address') or '?'}", color=_FG)
+            for p in open_ports:
+                detail = " ".join(
+                    x for x in (p.get("service"), p.get("product"), p.get("version")) if x
+                )
+                self._row(self.nmap_lay, f"      {p.get('portid')}/{p.get('protocol')}   {detail}", color=_MUTED)
+        if not any_open:
+            # A real, successful scan that found no open ports — NOT an error, NOT invented.
+            self._row(self.nmap_lay, "  no open ports in the result", color=_MUTED)
+
     def refresh(self) -> None:
         """Read real state and render it. Read-only — never triggers a scan."""
         try:
@@ -263,6 +367,9 @@ class MainWindow(QMainWindow):
             self.status_line.setText(f"could not read state: {type(exc).__name__}: {exc}")
             return
         self.apply_view(backend.build_view_model(snap, staleness))
+        # nmap results live in-session (not part of the persisted snapshot) — re-render the
+        # last one so a Refresh of the display doesn't blank it.
+        self.apply_nmap_outcome(self._last_nmap)
         self.status_line.setText("state refreshed (read-only)")
 
     # ---------------------------------------------------------------- actions
@@ -288,6 +395,33 @@ class MainWindow(QMainWindow):
             # Honest failure: the real error, never a fake 'all clear'.
             self.status_line.setText(f"scan did NOT complete: {outcome.error}")
         self.refresh()  # re-read whatever real state the scan persisted (or didn't)
+
+    def _on_nmap(self) -> None:
+        # A scan already in flight? Ignore re-triggers so we never start two workers at once.
+        if self._nmap_worker is not None and self._nmap_worker.isRunning():
+            return
+        target = self.nmap_target_edit.text().strip()
+        if not target:
+            self.status_line.setText("nmap needs a target — an IP/host on your own network")
+            return
+        scan_type = self.nmap_type_combo.currentText()
+        ports = self.nmap_ports_edit.text().strip() or None
+        self.nmap_btn.setEnabled(False)
+        self.status_line.setText(
+            f"running nmap ({scan_type}) on {target} (through the audited container wrapper)…"
+        )
+        self._nmap_worker = NmapWorker(self._runner, target, scan_type, ports)
+        self._nmap_worker.done.connect(self._on_nmap_done)
+        self._nmap_worker.start()
+
+    def _on_nmap_done(self, outcome: NmapOutcome) -> None:
+        self.nmap_btn.setEnabled(True)
+        self._last_nmap = outcome
+        self.apply_nmap_outcome(outcome)
+        if outcome.ok:
+            self.status_line.setText(f"nmap complete — {outcome.summary}")
+        else:
+            self.status_line.setText(f"nmap did NOT complete: {outcome.error}")
 
 
 def build_window(runner: ScanRunner | None = None, *, do_refresh: bool = True) -> MainWindow:
