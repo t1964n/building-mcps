@@ -33,6 +33,14 @@ than a local web dashboard.
   refused instantly with a real reason, not scanned. The last result renders in its own
   panel: open ports per host with service/version, honestly distinguishing "no scan yet",
   "host down / no open ports", and "scan failed" — none is dressed up as another.
+- **Generates** the self-contained dashboard HTML (`generate_dashboard`) from the same
+  produced state the display reads. This is a **read + write-a-file action, not a scan** —
+  it runs no tool binary and opens no port, so it runs **in-process** (like the display),
+  not through the container: there is no target to scope-check and no offensive tool to
+  gate. On success the panel shows the written file path and, if the underlying scan is old,
+  stamps its age (a fresh file built on a stale scan is **not** current data). If the
+  snapshot can't be built it writes **nothing** and shows the real reason — never a path to
+  a blank/stale file dressed up as current.
 
 ## Architecture (thin shell, testable core)
 
@@ -41,8 +49,10 @@ desktop/
 ├── backend.py   # Qt-FREE, fully unit-tested:
 │                 #   snapshot()          -> read-only build_status() + staleness
 │                 #   build_view_model()  -> pure reduction to the honest ViewModel
-│                 #   DockerScanRunner    -> runs arp_watch in the container (injectable
+│                 #   DockerScanRunner    -> runs arp_watch/nmap in the container (injectable
 │                 #                          process runner, so it's tested without Docker)
+│                 #   run_generate_dashboard() -> writes the dashboard in-process from state
+│                 #                          (injectable generator, tested without disk/state)
 └── app.py       # PySide6 view ONLY: builds widgets, moves ViewModel data into them.
                  #   No business logic lives here.
 ```
@@ -81,6 +91,11 @@ a ports spec (`22,80,443` or `1-1024`); an out-of-scope target is refused before
 container runs. Results — open ports per host with service/version — render in the
 **LAST NMAP SCAN** panel.
 
+**Generate dashboard** takes no input: it writes `state/dashboard.html` from the current
+produced state (needs no Docker) and shows the path in the **DASHBOARD** panel — open that
+file from disk (it is self-contained: no server, no port). If it can't build a snapshot it
+writes nothing and shows the real reason.
+
 ## Accessibility
 
 Carries over the HTML dashboard's rules: high contrast on near-black, ≥19px text, and
@@ -89,12 +104,12 @@ Carries over the HTML dashboard's rules: high contrast on near-black, ≥19px te
 
 ## Status — first vertical slice
 
-Done: the honest read-only display of all states + two working actions — `arp_watch`
+Done: the honest read-only display of all states + three working actions — `arp_watch`
 (with an optional scope-checked target range) and `nmap_scan` (target + allow-list scan
-type + optional ports) — both wired through the gated container wrapper on a worker
-thread, with the backend fully under test. Natural next steps (not built yet):
-`generate_dashboard` from the panel, a live rogue timeline, and auto-refresh.
-```
+type + optional ports), both wired through the gated container wrapper on a worker thread,
+plus `generate_dashboard` (writes the self-contained HTML in-process from produced state,
+off the UI thread). The backend for all three is fully under test. Natural next steps (not
+built yet): a live rogue timeline and auto-refresh.
 
 > Note: `state/` and `logs/` hold your real device data and are gitignored — the app
 > reads them locally; they are never committed.

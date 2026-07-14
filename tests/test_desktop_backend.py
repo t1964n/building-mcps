@@ -14,11 +14,13 @@ import subprocess
 import pytest
 
 from desktop.backend import (
+    DashboardOutcome,
     DockerScanRunner,
     NmapOutcome,
     ScanOutcome,
     build_view_model,
     normalize_range,
+    run_generate_dashboard,
     _nmap_outcome_from_stdout,
     _parse_verdict,
 )
@@ -349,3 +351,88 @@ def test_nmap_host_down_is_a_real_ok_result_not_an_error():
 def test_nmap_unparseable_stdout_is_error_not_empty_result():
     out = _nmap_outcome_from_stdout("some banner but no json", ["docker"], 0)
     assert out.ok is False and "could not parse" in out.error
+
+
+# ---------------------------------------------------------- dashboard action
+
+_DASH_OK = {
+    "status": "ok",
+    "wrote": True,
+    "path": "/repo/state/dashboard.html",
+    "generated_at": "2026-07-14T00:00:00+00:00",
+    "summary": "1 rogue device(s); last scan 3m ago",
+    "network": {"available": True, "as_of": "2026-07-14T00:00:00+00:00", "stale": False, "age_human": "3m"},
+}
+
+
+class _CaptureGen:
+    """A fake dashboard generator: records the output_path it was called with and returns
+    a canned result dict (default: a clean write)."""
+
+    def __init__(self, payload=None):
+        self.output_path = "__unset__"
+        self._payload = payload if payload is not None else _DASH_OK
+
+    def __call__(self, *, output_path=None):
+        self.output_path = output_path
+        return self._payload
+
+
+def test_dashboard_success_returns_path_and_summary():
+    gen = _CaptureGen()
+    out = run_generate_dashboard(generator=gen)
+    assert out.ok and out.error is None
+    assert out.path == "/repo/state/dashboard.html"
+    assert "last scan 3m ago" in out.summary
+    assert out.stale is False and out.age_human == "3m"
+
+
+def test_dashboard_forwards_output_path_to_generator():
+    gen = _CaptureGen()
+    run_generate_dashboard(output_path="/tmp/dash.html", generator=gen)
+    assert gen.output_path == "/tmp/dash.html"
+
+
+def test_dashboard_generation_error_is_honest_no_path():
+    # The generator refused to write (snapshot build failed) — surface the real reason and
+    # NO path; never report a written file that doesn't exist (CLAUDE.md §2).
+    payload = {
+        "status": "error",
+        "wrote": False,
+        "error": "RuntimeError: boom",
+        "reason": "dashboard generation failed while building the status snapshot; no file was written",
+    }
+    out = run_generate_dashboard(generator=_CaptureGen(payload))
+    assert out.ok is False
+    assert out.path is None and out.summary is None
+    assert "no file was written" in out.error
+
+
+def test_dashboard_status_ok_but_not_written_is_treated_as_failure():
+    # Defensive: an 'ok' status that nonetheless didn't write is NOT a success.
+    payload = {"status": "ok", "wrote": False, "path": "/repo/state/dashboard.html"}
+    out = run_generate_dashboard(generator=_CaptureGen(payload))
+    assert out.ok is False and out.path is None
+
+
+def test_dashboard_generator_exception_is_reported_not_raised():
+    def _boom(*, output_path=None):
+        raise OSError("disk full")
+
+    out = run_generate_dashboard(generator=_boom)
+    assert out.ok is False
+    assert "OSError" in out.error and "disk full" in out.error
+
+
+def test_dashboard_stale_scan_flag_passes_through():
+    # A freshly-written file built on an OLD scan must carry stale=True + the age, so the UI
+    # can say the data is not current.
+    payload = {
+        "status": "ok",
+        "wrote": True,
+        "path": "/repo/state/dashboard.html",
+        "summary": "all clear; last scan 5d ago",
+        "network": {"available": True, "stale": True, "age_human": "5d"},
+    }
+    out = run_generate_dashboard(generator=_CaptureGen(payload))
+    assert out.ok and out.stale is True and out.age_human == "5d"

@@ -2,8 +2,10 @@
 
 A THIN view over desktop.backend (CLAUDE.md desktop decision 2026-07-06):
   * displays the honest platform snapshot (read-only — never scans to fill the screen);
-  * one action, Run arp_watch, triggered through the audited + scope-gated wrapper in the
-    container, on a worker thread so the window never freezes.
+  * scan actions (Run arp_watch, Run nmap) go through the audited + scope-gated wrapper in
+    the container, on a worker thread so the window never freezes;
+  * Generate dashboard writes the self-contained HTML from produced state in-process — a
+    read + write-a-file action, not a scan (see DashboardOutcome), also off the UI thread.
 
 No network port is opened; this is a native window. All business logic lives in
 desktop.backend — this file only builds widgets and moves data into them.
@@ -32,6 +34,7 @@ from PySide6.QtWidgets import (
 from desktop import backend
 from desktop.backend import (
     NMAP_SCAN_TYPES,
+    DashboardOutcome,
     DockerScanRunner,
     NmapOutcome,
     ScanOutcome,
@@ -97,6 +100,16 @@ class NmapWorker(QThread):
         self.done.emit(outcome)
 
 
+class DashboardWorker(QThread):
+    """Generates the self-contained dashboard off the UI thread; emits the honest
+    DashboardOutcome. In-process (no container) — see backend.DashboardOutcome."""
+
+    done = Signal(object)  # DashboardOutcome
+
+    def run(self) -> None:  # QThread entry point
+        self.done.emit(backend.run_generate_dashboard())
+
+
 def _panel(title: str) -> tuple[QFrame, QVBoxLayout]:
     frame = QFrame()
     frame.setStyleSheet(f"QFrame {{ background: {_PANEL}; border-radius: 8px; }}")
@@ -115,6 +128,8 @@ class MainWindow(QMainWindow):
         self._worker: ScanWorker | None = None
         self._nmap_worker: NmapWorker | None = None
         self._last_nmap: NmapOutcome | None = None
+        self._dash_worker: DashboardWorker | None = None
+        self._last_dashboard: DashboardOutcome | None = None
 
         self.setWindowTitle("Kali MCP — Network Watch")
         self.setStyleSheet(
@@ -155,7 +170,10 @@ class MainWindow(QMainWindow):
         self.scan_btn.clicked.connect(self._on_scan)
         self.refresh_btn = QPushButton("⟳  Refresh")
         self.refresh_btn.clicked.connect(self.refresh)
-        for b in (self.scan_btn, self.refresh_btn):
+        # Global, no-input action: write the self-contained dashboard from produced state.
+        self.dash_btn = QPushButton("▤  Generate dashboard")
+        self.dash_btn.clicked.connect(self._on_generate_dashboard)
+        for b in (self.scan_btn, self.refresh_btn, self.dash_btn):
             b.setStyleSheet(
                 f"QPushButton {{ background: {_PANEL}; color: {_FG}; border: 1px solid #2b3546; "
                 "border-radius: 6px; padding: 8px 14px; font-weight: 600; } "
@@ -163,6 +181,7 @@ class MainWindow(QMainWindow):
             )
         bar.addWidget(self.scan_btn)
         bar.addWidget(self.refresh_btn)
+        bar.addWidget(self.dash_btn)
         bar.addStretch(1)
         outer.addLayout(bar)
 
@@ -235,6 +254,10 @@ class MainWindow(QMainWindow):
         nmap_frame, self.nmap_lay = _panel("LAST NMAP SCAN (this session)")
         outer.addWidget(nmap_frame)
 
+        # --- dashboard result -----------------------------------------------------
+        dash_frame, self.dash_lay = _panel("DASHBOARD (self-contained HTML)")
+        outer.addWidget(dash_frame)
+
         # --- rogues + activity (scrollable) --------------------------------------
         rogue_frame, self.rogue_lay = _panel("ROGUE DEVICES")
         outer.addWidget(rogue_frame)
@@ -250,7 +273,8 @@ class MainWindow(QMainWindow):
         outer.addWidget(self.status_line)
 
         self.apply_nmap_outcome(None)  # seed "no nmap scan run yet"
-        self.resize(960, 980)
+        self.apply_dashboard_outcome(None)  # seed "no dashboard generated yet"
+        self.resize(960, 1040)
 
     # ---------------------------------------------------------------- helpers
     def _muted_label(self, text: str) -> QLabel:
@@ -359,6 +383,28 @@ class MainWindow(QMainWindow):
             # A real, successful scan that found no open ports — NOT an error, NOT invented.
             self._row(self.nmap_lay, "  no open ports in the result", color=_MUTED)
 
+    def apply_dashboard_outcome(self, outcome: DashboardOutcome | None) -> None:
+        """Render the last dashboard generation honestly. Not-run-yet, a failed generation
+        (nothing written), and a written file are three DISTINCT states — a failure is never
+        dressed up as a written file, and a file built on a stale scan says so."""
+        self._clear(self.dash_lay)
+        if outcome is None:
+            self._row(self.dash_lay, "no dashboard generated yet — click Generate dashboard", color=_MUTED)
+            return
+        if not outcome.ok:
+            # Honest failure: the real reason, and NO file was written.
+            self._row(self.dash_lay, f"⚠  not generated: {outcome.error}", color=_LEVEL_COLOR["rogue"])
+            return
+        self._row(self.dash_lay, f"✓  {outcome.summary or 'dashboard written'}", color=_LEVEL_COLOR["all_clear"])
+        self._row(self.dash_lay, f"  file: {outcome.path}", color=_FG)
+        if outcome.stale:
+            self._row(
+                self.dash_lay,
+                f"  ⏱ underlying scan is {outcome.age_human} old — the dashboard stamps this; it is NOT current data",
+                color=_STALE_COLOR,
+            )
+        self._row(self.dash_lay, "  open it from disk — self-contained (no server, no port)", color=_MUTED)
+
     def refresh(self) -> None:
         """Read real state and render it. Read-only — never triggers a scan."""
         try:
@@ -367,9 +413,10 @@ class MainWindow(QMainWindow):
             self.status_line.setText(f"could not read state: {type(exc).__name__}: {exc}")
             return
         self.apply_view(backend.build_view_model(snap, staleness))
-        # nmap results live in-session (not part of the persisted snapshot) — re-render the
-        # last one so a Refresh of the display doesn't blank it.
+        # nmap + dashboard results live in-session (not part of the persisted snapshot) —
+        # re-render the last of each so a Refresh of the display doesn't blank them.
         self.apply_nmap_outcome(self._last_nmap)
+        self.apply_dashboard_outcome(self._last_dashboard)
         self.status_line.setText("state refreshed (read-only)")
 
     # ---------------------------------------------------------------- actions
@@ -422,6 +469,25 @@ class MainWindow(QMainWindow):
             self.status_line.setText(f"nmap complete — {outcome.summary}")
         else:
             self.status_line.setText(f"nmap did NOT complete: {outcome.error}")
+
+    def _on_generate_dashboard(self) -> None:
+        # Already generating? Ignore re-triggers so we never start two workers at once.
+        if self._dash_worker is not None and self._dash_worker.isRunning():
+            return
+        self.dash_btn.setEnabled(False)
+        self.status_line.setText("generating dashboard from produced state (read-only, no scan)…")
+        self._dash_worker = DashboardWorker()
+        self._dash_worker.done.connect(self._on_dashboard_done)
+        self._dash_worker.start()
+
+    def _on_dashboard_done(self, outcome: DashboardOutcome) -> None:
+        self.dash_btn.setEnabled(True)
+        self._last_dashboard = outcome
+        self.apply_dashboard_outcome(outcome)
+        if outcome.ok:
+            self.status_line.setText(f"dashboard written to {outcome.path}")
+        else:
+            self.status_line.setText(f"dashboard NOT generated: {outcome.error}")
 
 
 def build_window(runner: ScanRunner | None = None, *, do_refresh: bool = True) -> MainWindow:

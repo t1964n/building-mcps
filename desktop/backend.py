@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Callable, Protocol
 
 from kali_mcp.dashboard import compute_network_staleness
+from kali_mcp.dashboard import generate_dashboard as _generate_dashboard
 from kali_mcp.scope import validate_target
 from kali_mcp.status import build_status
 
@@ -222,6 +223,28 @@ class NmapOutcome:
     returncode: int | None
 
 
+@dataclass(frozen=True)
+class DashboardOutcome:
+    """The honest result of a GUI-triggered dashboard generation. This is a
+    read-produced-state + write-a-file action, NOT a scan: it runs no tool binary and
+    opens no port, exactly like the panel's read-only display path — so it runs IN-PROCESS
+    through kali_mcp.dashboard.generate_dashboard, not the container. (The container path
+    exists for scope-gated SCANS against a target; this has neither a target nor a tool
+    binary, so routing it through Docker would add nothing but a gate that doesn't apply.)
+
+    ok=False ALWAYS carries a real error and path=None — the generator writes NOTHING on
+    failure, so we never point at a blank/stale file dressed up as current (CLAUDE.md §2).
+    `stale`/`age_human` reflect the underlying scan's age (the dashboard stamps it), so a
+    freshly-written file built on an old scan is not mistaken for current data."""
+
+    ok: bool
+    path: str | None
+    summary: str | None
+    stale: bool
+    age_human: str | None
+    error: str | None
+
+
 class ScanRunner(Protocol):
     def run_arp_watch(self, *, interface: str, target_range: str | None = None) -> ScanOutcome: ...
     def run_nmap(self, *, target: str, scan_type: str = "default", ports: str | None = None) -> NmapOutcome: ...
@@ -290,6 +313,54 @@ def _nmap_outcome_from_stdout(stdout: str, argv: list[str], returncode: int | No
         )
     reason = obj.get("reason") or f"nmap did not return a clean result (status: {obj.get('status')!r})"
     return NmapOutcome(False, None, [], None, reason, argv, returncode)
+
+
+# --------------------------------------------------------------- dashboard action
+
+DashboardGenerator = Callable[..., dict]
+
+
+def _default_dashboard_generator(*, output_path: str | None = None) -> dict:
+    """The real generator: kali_mcp.dashboard.generate_dashboard, run in-process. Kept
+    behind a thin wrapper so run_generate_dashboard can inject a fake in tests."""
+    return _generate_dashboard(output_path=output_path)
+
+
+def run_generate_dashboard(
+    *, output_path: str | None = None, generator: DashboardGenerator | None = None
+) -> DashboardOutcome:
+    """Generate the self-contained dashboard HTML from live, produced state and return an
+    honest DashboardOutcome. Runs IN-PROCESS (see DashboardOutcome) — no Docker, no scan.
+    The generator is injectable so this whole path is unit-testable without touching disk
+    or real state.
+
+    Any non-ok generator result (status != 'ok', or wrote=False) is surfaced as its real
+    reason with path=None — never reported as a written-file success (CLAUDE.md §2). An
+    unexpected exception from the generator is caught and returned as an honest error, not
+    raised into the UI thread's signal handler."""
+    gen = generator or _default_dashboard_generator
+    try:
+        result = gen(output_path=output_path)
+    except Exception as exc:  # noqa: BLE001 — surface ANY generation failure honestly
+        return DashboardOutcome(False, None, None, False, None, f"{type(exc).__name__}: {exc}")
+
+    if result.get("status") != "ok" or not result.get("wrote"):
+        reason = (
+            result.get("reason")
+            or result.get("error")
+            or f"dashboard was not written (status: {result.get('status')!r})"
+        )
+        return DashboardOutcome(False, None, None, False, None, reason)
+
+    net = result.get("network") or {}
+    return DashboardOutcome(
+        True,
+        result.get("path"),
+        result.get("summary"),
+        bool(net.get("stale")),
+        net.get("age_human"),
+        None,
+    )
 
 
 @dataclass
